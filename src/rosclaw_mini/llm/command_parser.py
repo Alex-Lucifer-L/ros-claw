@@ -1,5 +1,5 @@
 from rosclaw_mini.command_schema.commands import Command
-
+import json
 
 def parse_command(command_str: str, command_id: str) -> Command:
     command_str = command_str.strip()
@@ -34,3 +34,13 @@ def parse_command(command_str: str, command_id: str) -> Command:
         params={},
         source="user"
     )
+
+def parse_json_command(command_json: str,command_id: str) -> Command:
+    command=json.loads(command_json)
+    return Command(
+        command_id=command_id,
+        skill_name=command["skill_name"],
+        params=command["params"],
+        source="user"
+    )
+
