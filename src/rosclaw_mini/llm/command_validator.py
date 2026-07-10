@@ -14,7 +14,7 @@ def validate_command_data(command_data)-> bool:
     if not isinstance(command_data.get("skill_name"), str):
         return False
     
-    if command_data.get("skill_name")=="":
+    if command_data.get("skill_name").strip()=="":
         return False
     
     if "params" not in command_data:
