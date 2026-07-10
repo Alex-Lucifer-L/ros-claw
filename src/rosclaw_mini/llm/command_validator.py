@@ -1,15 +1,10 @@
 def validate_command_data(command_data)-> bool:
     """
-    校验指令数据
-    分别校验command的格式
-    1. skill_name是否
-    2. params是否为字典
-    3. params中的key和value是否都为字符串
-    4. command_id是否为字符串
-    5. command_id是否不为空
-
-    
-    """
+    验证 JSON 解析后的命令数据结构：
+    1. command_data 必须是字典
+    2. skill_name 必须存在且为非空字符串
+    3. params 必须存在且为字典
+    """     
     if not isinstance(command_data, dict):
         return False
     
