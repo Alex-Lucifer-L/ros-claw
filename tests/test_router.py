@@ -1,31 +1,28 @@
-from src.rosclaw_mini.command_schema.schemas import GatewayRequest, Route
-from src.rosclaw_mini.gateway.router import match_route
+import json
+
+from rosclaw_mini.llm.command_parser import parse_json_command
 
 
-request = GatewayRequest(
-    request_id="req-001",
-    path="/api/robot/move",
-    method="GET"
-)
+def test_parse_json_command():
+    command = parse_json_command('{"skill_name": "open_gripper", "params": {}}', "cmd-001")
+    assert command.command_id == "cmd-001"
+    assert command.skill_name == "open_gripper"
+    assert command.params == {}
 
-routes = [
-    Route(
-        path_prefix="/api",
-        service_name="default_service",
-        permission_required="public"
-    ),
-    Route(
-        path_prefix="/api/robot",
-        service_name="robot_service",
-        permission_required="public"
-    ),
-    Route(
-        path_prefix="/api/vision",
-        service_name="vision_service",
-        permission_required="public"
-    ),
-]
 
-matched_route = match_route(request, routes)
+def test_parse_json_command_rejects_invalid_json():
+    try:
+        parse_json_command("not json", "cmd-002")
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("invalid JSON should raise JSONDecodeError")
 
-print(matched_route)
+
+def test_parse_json_command_rejects_invalid_shape():
+    try:
+        parse_json_command('{"skill_name": "stop"}', "cmd-003")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid command shape should raise ValueError")

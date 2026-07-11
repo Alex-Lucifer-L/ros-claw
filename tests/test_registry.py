@@ -1,27 +1,13 @@
-from src.rosclaw_mini.command_schema.schemas import Service
-from src.rosclaw_mini.gateway.registry import find_service_by_name
+from rosclaw_mini.skills.base import ParamSpec, SkillDefinition
 
-services = [
-    Service(
-        name="default_service",
-        url="http://localhost:8000",
-        status="healthy",
-        enabled=True
-    ),
-    Service(
-        name="robot_service",
-        url="http://localhost:8001",
-        status="healthy",
-        enabled=True
-    ),
-    Service(
-        name="vision_service",
-        url="http://localhost:8002",
-        status="healthy",
-        enabled=True
-    ),
-]
 
-service = find_service_by_name(services, "robot_service")
-
-print(service)
+def test_skill_definition_holds_parameter_schema():
+    skill = SkillDefinition(
+        skill_name="test_skill",
+        description="test",
+        risk_level="low",
+        enabled=True,
+        params_schema={"value": ParamSpec((int,), min_value=0, max_value=1)},
+    )
+    assert skill.params_schema["value"].accepted_types == (int,)
+    assert skill.allow_extra_params is False
