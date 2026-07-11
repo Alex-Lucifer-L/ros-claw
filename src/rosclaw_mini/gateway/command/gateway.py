@@ -1,11 +1,14 @@
-from rosclaw_mini.safety.checker import check_command
-from rosclaw_mini.skills.registry import find_skillInfo_by_skill_name
-from rosclaw_mini.arm.mock_arm import execute_command
-from rosclaw_mini.command_schema.commands import Command,ExecutionResult, SkillInfo
+#此文件定义了网关命令的运行逻辑，包括安全检查、技能查找和命令执行。
 
-def run_command(command:Command, skills:list[SkillInfo])-> ExecutionResult:
+from rosclaw_mini.safety.checker import check_command
+from rosclaw_mini.skills.registry import find_skill
+from rosclaw_mini.arm.mock_arm import execute_command
+from rosclaw_mini.command_schema.commands import Command,ExecutionResult
+from rosclaw_mini.skills.base import SkillDefinition
+
+def run_command(command:Command, skills: dict[str, SkillDefinition])-> ExecutionResult:
     """
-    运行机器人运行命令
+    运行机器人运行命令S
     """
     check_result = check_command(command)
     if not check_result.is_safe:
@@ -16,7 +19,7 @@ def run_command(command:Command, skills:list[SkillInfo])-> ExecutionResult:
             message=check_result.reason
         )
     
-    skill=find_skillInfo_by_skill_name(skills, command.skill_name)
+    skill=find_skill(command.skill_name,skills)
 
     if skill is None:
         return ExecutionResult(

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
  
 @dataclass
-class ParamSpec:
+class ParamsSpec:
     """
     参数规格的结构体：
     这个结构体定义了技能参数的规格信息，包括参数名称、接受的类型、是否必需、最小值和最大值
@@ -40,6 +40,6 @@ class SkillDefinition:
     description: str
     risk_level: str
     enabled: bool
-    param_schema: dict[str, ParamSpec]
+    params_schema: dict[str, ParamsSpec]
     allow_extra_params: bool = False
 
