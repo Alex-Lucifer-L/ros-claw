@@ -9,7 +9,7 @@ BUILTIN_SKILLS = {
     "close_gripper": close_gripper_skill,
     "stop": stop_skill
 }
-
+    
 def find_skill(skill_name: str, skills: dict[str, SkillDefinition]) -> SkillDefinition | None:
     """
     根据技能名称在技能注册表中查找对应的技能定义。
