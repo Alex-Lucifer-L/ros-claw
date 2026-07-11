@@ -1,34 +1,11 @@
-from rosclaw_mini.command_schema.commands import SkillInfo
+###此文件定义了内置技能的注册表，并提供了一个函数来根据技能名称查找技能信息。
+from rosclaw_mini.command_schema.commands import Command
+from rosclaw_mini.skills.base import   SkillDefinition
 
-BUILTIN_SKILLS = [
-    SkillInfo(
-        skill_name="move_arm",
-        description="移动机械臂到指定的 x、y、z 位置",
-        risk_level="medium",
-        enabled=True,
-    ),
-    SkillInfo(
-        skill_name="open_gripper",
-        description="打开机械臂夹爪",
-        risk_level="low",
-        enabled=True,
-    ),
-    SkillInfo(
-        skill_name="close_gripper",
-        description="关闭机械臂夹爪",
-        risk_level="low",
-        enabled=True,
-    ),
-    SkillInfo(
-        skill_name="stop",
-        description="停止当前机械臂动作",
-        risk_level="low",
-        enabled=True,
-    ),
-]
+BUILTIN_SKILLS = {
+    "move_arm": move_arm_skill,
+    "open_gripper": open_gripper_skill,
+    "close_gripper": close_gripper_skill,
+    "stop": stop_skill
+}
 
-def find_skillInfo_by_skill_name(skills:list[SkillInfo], skill_name:str)-> SkillInfo | None:
-    for skill in skills:
-        if skill.skill_name == skill_name:
-            return skill
-    return None
