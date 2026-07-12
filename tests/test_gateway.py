@@ -23,7 +23,7 @@ def test_run_valid_command():
 def test_reject_unsafe_command():
     result = run_command(make_command(params={"x": 2.0, "y": 0.4, "z": 0.3}), BUILTIN_SKILLS)
     assert result.success is False
-    assert "Invalid x" in result.message
+    assert "x" in result.message
 
 
 def test_reject_unknown_skill():

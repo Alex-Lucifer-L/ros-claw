@@ -24,8 +24,25 @@ def check_command(command: Command, skill: SkillDefinition) -> SafetyResult:
     
     params=command.params
     for param_name, param_spec in skill.params_schema.items():
+        if param_name not in params:
+            if param_spec.required:
+                return SafetyResult(
+                    command_id=command.command_id,
+                    is_safe=False,
+                    risk_level="high",
+                    reason=f"UnsafeCommand, Missing parameter: {param_name}",
+                )
+            continue
+
+        param_value = params[param_name]
+        if type(param_value) not in param_spec.accepted_types:
+            return SafetyResult(
+                command_id=command.command_id,
+                is_safe=False,
+                risk_level="high",
+                reason=f"UnsafeCommand, Invalid parameter type: {param_name}",
+            )
         if param_name in params:
-            param_value = params[param_name]
             if param_spec.min_value is not None:
                 if param_spec.min_inclusive:
                     if param_value < param_spec.min_value:

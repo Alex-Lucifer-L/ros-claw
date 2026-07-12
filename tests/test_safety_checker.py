@@ -1,75 +1,147 @@
 from rosclaw_mini.command_schema.commands import Command
 from rosclaw_mini.safety.checker import check_command
+from rosclaw_mini.skills.base import ParamSpec, SkillDefinition
+from rosclaw_mini.skills.registry import BUILTIN_SKILLS
 
 
-def show_result(title, result):
-    print(f"\n=== {title} ===")
-    print(result)
+def make_command(skill_name: str, params: dict) -> Command:
+    return Command(
+        command_id="cmd-test-001",
+        skill_name=skill_name,
+        params=params,
+        source="user",
+    )
 
 
-# 1. move_arm 正常参数：应该安全
-cmd_1 = Command(
-    command_id="cmd-001",
-    skill_name="move_arm",
-    params={
-        "x": 0.5,
-        "y": 0.4,
-        "z": 0.3,
-    },
-    source="user"
-)
+def test_accept_valid_move_arm_command():
+    command = make_command(
+        "move_arm",
+        {"x": 0.5, "y": 0.4, "z": 0.3},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
 
-result_1 = check_command(cmd_1)
-show_result("move_arm 正常参数", result_1)
+    result = check_command(command, skill)
+
+    assert result.is_safe is True
+    assert result.risk_level == "medium"
 
 
-# 2. move_arm 参数越界：应该不安全
-cmd_2 = Command(
-    command_id="cmd-002",
-    skill_name="move_arm",
-    params={
-        "x": 2.0,
-        "y": 0.4,
-        "z": 0.3,
-    },
-    source="user"
-)
+def test_reject_value_equal_to_exclusive_minimum():
+    command = make_command(
+        "move_arm",
+        {"x": 0, "y": 0.4, "z": 0.3},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
 
-result_2 = check_command(cmd_2)
-show_result("move_arm x 越界", result_2)
+    result = check_command(command, skill)
+
+    assert result.is_safe is False
+    assert "x" in result.reason
 
 
-# 3. move_arm 缺少 z：应该不安全
-cmd_3 = Command(
-    command_id="cmd-003",
-    skill_name="move_arm",
-    params={
-        "x": 0.5,
-        "y": 0.4,
-    },
-    source="user"
-)
+def test_reject_value_below_minimum():
+    command = make_command(
+        "move_arm",
+        {"x": -0.1, "y": 0.4, "z": 0.3},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
 
-result_3 = check_command(cmd_3)
-show_result("move_arm 缺少 z", result_3)
+    result = check_command(command, skill)
+
+    assert result.is_safe is False
+    assert "x" in result.reason
 
 
-# 4. open_gripper 不需要参数：应该安全
-cmd_4 = Command(
-    command_id="cmd-004",
-    skill_name="open_gripper",
-    params={},
-    source="user"
-)
+def test_accept_value_equal_to_inclusive_maximum():
+    command = make_command(
+        "move_arm",
+        {"x": 1, "y": 0.4, "z": 0.3},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
 
-result_4 = check_command(cmd_4)
-show_result("open_gripper 空参数", result_4)
+    result = check_command(command, skill)
+
+    assert result.is_safe is True
 
 
-# 简单断言：如果结果不符合预期，程序会报错
-assert result_1.is_safe is True
-assert result_2.is_safe is False
-assert result_3.is_safe is False
-assert result_4.is_safe is True
+def test_reject_value_above_maximum():
+    command = make_command(
+        "move_arm",
+        {"x": 1.1, "y": 0.4, "z": 0.3},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
 
-print("\n所有 Safety Checker 测试通过")
+    result = check_command(command, skill)
+
+    assert result.is_safe is False
+    assert "x" in result.reason
+
+
+def test_reject_missing_required_parameter():
+    command = make_command(
+        "move_arm",
+        {"x": 0.5, "y": 0.4},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
+
+    result = check_command(command, skill)
+
+    assert result.is_safe is False
+    assert "z" in result.reason
+
+
+def test_reject_wrong_parameter_type():
+    command = make_command(
+        "move_arm",
+        {"x": "0.5", "y": 0.4, "z": 0.3},
+    )
+    skill = BUILTIN_SKILLS["move_arm"]
+
+    result = check_command(command, skill)
+
+    assert result.is_safe is False
+    assert "x" in result.reason
+
+
+def test_accept_skill_without_parameters():
+    command = make_command("open_gripper", {})
+    skill = BUILTIN_SKILLS["open_gripper"]
+
+    result = check_command(command, skill)
+
+    assert result.is_safe is True
+    assert result.risk_level == "low"
+
+
+def test_generic_checker_supports_different_boundaries():
+    skill = SkillDefinition(
+        skill_name="test_skill",
+        description="测试不同的开闭区间",
+        risk_level="medium",
+        enabled=True,
+        params_schema={
+            "value": ParamSpec(
+                accepted_types=(int, float),
+                min_value=0,
+                max_value=10,
+                min_inclusive=True,
+                max_inclusive=False,
+            )
+        },
+    )
+
+    minimum_command = make_command(
+        "test_skill",
+        {"value": 0},
+    )
+    maximum_command = make_command(
+        "test_skill",
+        {"value": 10},
+    )
+
+    minimum_result = check_command(minimum_command, skill)
+    maximum_result = check_command(maximum_command, skill)
+
+    assert minimum_result.is_safe is True
+    assert maximum_result.is_safe is False
+    assert "value" in maximum_result.reason
