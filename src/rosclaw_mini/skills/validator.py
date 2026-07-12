@@ -16,8 +16,6 @@ def validate_skill_params(skill: SkillDefinition, params: dict) -> tuple[bool, s
             if type(param_value) not in param_spec.accepted_types:
                 return False, f"参数 {param_name} 的类型不正确，期望类型为 {param_spec.accepted_types}，但收到类型为 {type(param_value)}"
 
-    if skill.params_schema=={} and params:
-        return False, "此命令不允许任何参数，但提供了参数"
 
     if not skill.allow_extra_params:
         for extra_param in params.keys():
