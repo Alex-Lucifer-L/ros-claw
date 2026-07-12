@@ -43,7 +43,7 @@ def run_command(command:Command, skills: dict[str, SkillDefinition])-> Execution
         )
 
     #检查命令的安全性
-    check_result = check_command(command)
+    check_result = check_command(command, skill)
     if not check_result.is_safe:
         return ExecutionResult(
             command_id=command.command_id,

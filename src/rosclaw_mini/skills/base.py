@@ -19,6 +19,8 @@ class ParamSpec:
     required: bool=True
     min_value: float | None = None
     max_value: float | None = None
+    min_inclusive: bool = True
+    max_inclusive: bool = True
 
 
 @dataclass

@@ -12,16 +12,22 @@ move_arm_skill = SkillDefinition(
             accepted_types=(int, float),
             min_value=0,
             max_value=1,
+            min_inclusive=False,
+            max_inclusive=True
         ),
         "y": ParamSpec(
             accepted_types=(int, float),
             min_value=0,
             max_value=1,
+            min_inclusive=False,
+            max_inclusive=True
         ),
         "z": ParamSpec(
             accepted_types=(int, float),
             min_value=0,
             max_value=1,
+            min_inclusive=False,
+            max_inclusive=True
         ),
     },
 )
