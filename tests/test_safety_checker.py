@@ -128,6 +128,7 @@ def test_generic_checker_supports_different_boundaries():
                 max_inclusive=False,
             )
         },
+        handler=BUILTIN_SKILLS["stop"].handler,
     )
 
     minimum_command = make_command(

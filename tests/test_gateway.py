@@ -1,7 +1,8 @@
 from dataclasses import replace
 
-from rosclaw_mini.command_schema.commands import Command
+from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.gateway.command.gateway import run_command
+from rosclaw_mini.skills.base import SkillDefinition
 from rosclaw_mini.skills.registry import BUILTIN_SKILLS
 
 
@@ -18,6 +19,33 @@ def test_run_valid_command():
     result = run_command(make_command(), BUILTIN_SKILLS)
     assert result.success is True
     assert result.skill_name == "move_arm"
+
+
+def test_run_command_uses_registered_handler():
+    def custom_handler(command):
+        return ExecutionResult(
+            command_id=command.command_id,
+            skill_name=command.skill_name,
+            success=True,
+            message="custom handler called",
+        )
+
+    custom_skill = SkillDefinition(
+        skill_name="custom_skill",
+        description="test custom handler dispatch",
+        risk_level="low",
+        enabled=True,
+        params_schema={},
+        handler=custom_handler,
+    )
+
+    result = run_command(
+        make_command(skill_name="custom_skill", params={}),
+        {"custom_skill": custom_skill},
+    )
+
+    assert result.success is True
+    assert result.message == "custom handler called"
 
 
 def test_reject_unsafe_command():

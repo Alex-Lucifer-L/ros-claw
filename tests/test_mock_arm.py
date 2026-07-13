@@ -1,60 +1,58 @@
+from rosclaw_mini.arm.mock_arm import (
+    close_gripper,
+    move_arm,
+    open_gripper,
+    stop,
+)
 from rosclaw_mini.command_schema.commands import Command
-from rosclaw_mini.arm.mock_arm import execute_command
 
 
-def show_result(title, result):
-    print(f"\n=== {title} ===")
-    print(result)
+def make_command(command_id: str, skill_name: str, params: dict | None = None) -> Command:
+    return Command(
+        command_id=command_id,
+        skill_name=skill_name,
+        params=params if params is not None else {},
+        source="user",
+    )
 
 
-# 1. 测试 move_arm：应该执行成功
-cmd_1 = Command(
-    command_id="cmd-001",
-    skill_name="move_arm",
-    params={
-        "x": 0.5,
-        "y": 0.4,
-        "z": 0.3,
-    },
-    source="user"
-)
+def test_move_arm():
+    command = make_command(
+        "cmd-001",
+        "move_arm",
+        {"x": 0.5, "y": 0.4, "z": 0.3},
+    )
 
-result_1 = execute_command(cmd_1)
-show_result("move_arm 执行测试", result_1)
+    result = move_arm(command)
 
-
-# 2. 测试 open_gripper：应该执行成功
-cmd_2 = Command(
-    command_id="cmd-002",
-    skill_name="open_gripper",
-    params={},
-    source="user"
-)
-
-result_2 = execute_command(cmd_2)
-show_result("open_gripper 执行测试", result_2)
+    assert result.command_id == "cmd-001"
+    assert result.skill_name == "move_arm"
+    assert result.success is True
+    assert result.message == "机械臂已移动到位置: {'x': 0.5, 'y': 0.4, 'z': 0.3}"
 
 
-# 3. 测试未知技能：应该执行失败
-cmd_3 = Command(
-    command_id="cmd-003",
-    skill_name="destroy_arm",
-    params={},
-    source="user"
-)
+def test_open_gripper():
+    result = open_gripper(make_command("cmd-002", "open_gripper"))
 
-result_3 = execute_command(cmd_3)
-show_result("未知技能执行测试", result_3)
+    assert result.command_id == "cmd-002"
+    assert result.skill_name == "open_gripper"
+    assert result.success is True
+    assert result.message == "机械臂夹爪已打开"
 
 
-# 简单断言
-assert result_1.success is True
-assert result_1.skill_name == "move_arm"
+def test_close_gripper():
+    result = close_gripper(make_command("cmd-003", "close_gripper"))
 
-assert result_2.success is True
-assert result_2.skill_name == "open_gripper"
+    assert result.command_id == "cmd-003"
+    assert result.skill_name == "close_gripper"
+    assert result.success is True
+    assert result.message == "机械臂夹爪已关闭"
 
-assert result_3.success is False
-assert result_3.skill_name == "destroy_arm"
 
-print("\n所有 MockArm 测试通过")
+def test_stop():
+    result = stop(make_command("cmd-004", "stop"))
+
+    assert result.command_id == "cmd-004"
+    assert result.skill_name == "stop"
+    assert result.success is True
+    assert result.message == "机械臂已停止所有动作"

@@ -51,8 +51,15 @@ def run_command(command:Command, skills: dict[str, SkillDefinition])-> Execution
             message=check_result.reason
         )
     
-
-    return skill.handler(command)
+    try:
+        return skill.handler(command)
+    except Exception as error:
+        return ExecutionResult(
+            command_id=command.command_id,
+            skill_name=command.skill_name,
+            success=False,
+            message=f"技能执行失败: {str(error)}"
+        )
 
     
 
