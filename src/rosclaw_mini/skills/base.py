@@ -1,7 +1,11 @@
 ###此文件定义了技能参数规格和技能定义的结构体，用于描述技能的基本信息和参数要求。
-
+from collections.abc import Callable
+from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from dataclasses import dataclass
  
+skill_handler=Callable[[Command], ExecutionResult]
+#定义技能处理函数类型，接受一个 Command 对象作为输入，返回一个 ExecutionResult 对象作为输出。
+
 @dataclass
 class ParamSpec:
     """
@@ -43,5 +47,7 @@ class SkillDefinition:
     risk_level: str
     enabled: bool
     params_schema: dict[str, ParamSpec]
+    handler: skill_handler
     allow_extra_params: bool = False
+    
 

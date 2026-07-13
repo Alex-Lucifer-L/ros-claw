@@ -2,7 +2,6 @@
 
 from rosclaw_mini.safety.checker import check_command
 from rosclaw_mini.skills.registry import find_skill
-from rosclaw_mini.arm.mock_arm import execute_command
 from rosclaw_mini.command_schema.commands import Command,ExecutionResult
 from rosclaw_mini.skills.base import SkillDefinition
 from rosclaw_mini.skills.validator import validate_skill_params
@@ -53,9 +52,7 @@ def run_command(command:Command, skills: dict[str, SkillDefinition])-> Execution
         )
     
 
-
-    return execute_command(command)
-
+    return skill.handler(command)
 
     
 
