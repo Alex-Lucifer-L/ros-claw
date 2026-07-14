@@ -2,46 +2,59 @@ from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 
 
 
-def execute_command(command:Command)-> ExecutionResult:
-    if command.skill_name == "move_arm":
-        x=command.params.get("x")
-        y=command.params.get("y")
-        z=command.params.get("z")
-        return ExecutionResult(
-            command_id=command.command_id,
-            skill_name="move_arm",
-            success=True,
-            message=f"已移动机械臂到指定位置{x},{y},{z}",
-        )
-    
-    if command.skill_name == "open_gripper":
-        return ExecutionResult(
-            command_id=command.command_id,
-            skill_name="open_gripper",
-            success=True,
-            message="已打开夹爪",
-        )
-    
-    if command.skill_name == "close_gripper":
-        return ExecutionResult(
-            command_id=command.command_id,
-            skill_name="close_gripper",
-            success=True,
-            message="已关闭夹爪",
-        )
-    
-    if command.skill_name == "stop":
-        return ExecutionResult(
-            command_id=command.command_id,
-            skill_name="stop",
-            success=True,
-            message="已停止",
-        )
-    
+def move_arm(command: Command) -> ExecutionResult:
+    """
+    执行机械臂移动命令
+    """
+    # 这里可以添加实际的机械臂控制逻辑
+    # 例如，调用机械臂的API来移动到指定位置
+    # 目前仅返回一个模拟的执行结果
     return ExecutionResult(
         command_id=command.command_id,
         skill_name=command.skill_name,
-        success=False,
-        message="未知技能",
+        success=True,
+        message=f"机械臂已移动到位置: {command.params}"
+    )
+
+def open_gripper(command: Command) -> ExecutionResult:
+    """
+    执行机械臂夹爪打开命令
+    """
+    # 这里可以添加实际的机械臂控制逻辑
+    # 例如，调用机械臂的API来打开夹爪
+    # 目前仅返回一个模拟的执行结果
+    return ExecutionResult(
+        command_id=command.command_id,
+        skill_name=command.skill_name,
+        success=True,
+        message="机械臂夹爪已打开"
+    )
+
+def close_gripper(command: Command) -> ExecutionResult:
+    """
+    执行机械臂夹爪关闭命令
+    """
+    # 这里可以添加实际的机械臂控制逻辑
+    # 例如，调用机械臂的API来关闭夹爪
+    # 目前仅返回一个模拟的执行结果
+    return ExecutionResult(
+        command_id=command.command_id,
+        skill_name=command.skill_name,
+        success=True,
+        message="机械臂夹爪已关闭"
+    )
+
+def stop(command: Command) -> ExecutionResult:
+    """
+    执行机械臂停止命令
+    """
+    # 这里可以添加实际的机械臂控制逻辑
+    # 例如，调用机械臂的API来停止所有动作
+    # 目前仅返回一个模拟的执行结果
+    return ExecutionResult(
+        command_id=command.command_id,
+        skill_name=command.skill_name,
+        success=True,
+        message="机械臂已停止所有动作"
     )
 
