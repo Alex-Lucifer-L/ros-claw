@@ -3,9 +3,28 @@ from abc import ABC, abstractmethod
 
 class ArmAdapter(ABC):
     """
-    机械臂适配器接口类：
-    该类定义了机械臂的基本操作接口，包括移动、打开夹爪、关闭夹爪和停止动作。所有具体的机械臂适配器类都应该继承自该接口，并实现这些方法，以确保与机械臂的交互一致性和可扩展性。
-    具体直观通俗理解为：一个定义了机械臂操作规范的模板，任何实际的机械臂实现都必须按照这个模板来提供相应的功能。
+    机械臂硬件适配接口。
+
+    映射关系：
+        不同厂商的驱动函数
+        → ArmAdapter 统一原子操作
+
+    例如，不同驱动可能分别使用：
+        driver.send_coords(...)
+        driver.set_position(...)
+        ROS publisher.publish(...)
+
+    经过对应的 Adapter 包装后，上层统一调用：
+        adapter.move_to(...)
+        adapter.open_gripper()
+        adapter.close_gripper()
+        adapter.stop()
+
+    ArmAdapter 只负责统一硬件操作，不负责：
+        1. 解析 Command
+        2. 参数验证和安全检查
+        3. 编排 pick、place 等复杂 Skill
+        4. 生成 ExecutionResult
     """
 
     @abstractmethod
@@ -15,16 +34,32 @@ class ArmAdapter(ABC):
         y: float,
         z: float,
     ) -> None:
+        """
+        将不同厂商的机械臂移动函数，
+        统一映射为 move_to(x, y, z)。
+        """
         pass
 
     @abstractmethod
     def open_gripper(self) -> None:
+        """
+        将不同厂商的夹爪打开函数，
+        统一映射为 open_gripper()。
+        """
         pass
 
     @abstractmethod
     def close_gripper(self) -> None:
+        """
+        将不同厂商的夹爪关闭函数，
+        统一映射为 close_gripper()。
+        """
         pass
 
     @abstractmethod
     def stop(self) -> None:
+        """
+        将不同厂商的停止函数，
+        统一映射为 stop()。
+        """
         pass

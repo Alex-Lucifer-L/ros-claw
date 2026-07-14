@@ -58,32 +58,45 @@ def stop(command: Command) -> ExecutionResult:
         message="机械臂已停止所有动作"
     )
 
-class MockArmArmAdapter(ArmAdapter):
+class MockArmAdapter(ArmAdapter):
     """
-    模拟机械臂适配器，用于测试和开发阶段。
-    它实现了 ArmAdapter 接口，但不与实际的机械臂硬件交互。
-    该类用于在没有实际机械臂的情况下进行功能验证和测试。
-    通过使用 MockArmAdapter，可以模拟机械臂的行为，记录命令的执行情况，并提供可预测的响应，从而帮助开发人员在软件层面上进行调试和验证，而无需依赖实际的机械臂硬件。
-    这对于开发和测试阶段非常有用，尤其是在硬件不可用或不便使用的情况下。
-    该类的实现方法包括移动机械臂、打开和关闭夹爪，以及停止机械臂动作。每个方法都会记录相应的状态，以便在测试
+    模拟机械臂 Adapter。
+
+    它实现 ArmAdapter 规定的统一原子操作，
+    但不会调用真实驱动，也不会控制真实机械臂。
+
+    它只通过修改内部状态，模拟机械臂已经执行了操作。
     """
 
     def __init__(self):
-        self.position:tuple[float,float,float]|None = None
-        self.gripper_is_open:bool | None = None
-        self.is_stopped:bool | None = None
+        # 模拟机械臂当前所在位置。
+        self.position: tuple[float, float, float] | None = None
 
-    def move_to(self, x: float, y: float, z: float) -> None:
+        # 模拟夹爪状态：
+        # True 表示打开，False 表示关闭，None 表示尚未操作。
+        self.gripper_is_open: bool | None = None
+
+        # 模拟机械臂是否执行了停止命令。
+        self.is_stopped: bool = False
+
+    def move_to(
+        self,
+        x: float,
+        y: float,
+        z: float,
+    ) -> None:
+        # 模拟机械臂移动：不控制硬件，只记录新的目标位置。
         self.position = (x, y, z)
         self.is_stopped = False
 
     def open_gripper(self) -> None:
+        # 模拟打开夹爪。
         self.gripper_is_open = True
-        self.is_stopped = False
 
     def close_gripper(self) -> None:
+        # 模拟关闭夹爪。
         self.gripper_is_open = False
-        self.is_stopped = False
 
     def stop(self) -> None:
-        self.is_stopped = True      
+        # 模拟停止机械臂。
+        self.is_stopped = True
