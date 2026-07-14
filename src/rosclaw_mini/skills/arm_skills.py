@@ -1,7 +1,11 @@
 # 这个文件定义了机械臂技能的参数规范和技能定义，包括移动机械臂、打开和关闭机械爪以及停止机械臂动作的技能。
 
 from rosclaw_mini.skills.base import SkillDefinition,ParamSpec
-from rosclaw_mini.arm.mock_arm import move_arm, open_gripper, close_gripper, stop
+from rosclaw_mini.skills.arm_handler import ArmHandlers
+from rosclaw_mini.arm.mock_arm import MockArmAdapter
+
+mock_adapter = MockArmAdapter()
+arm_handlers = ArmHandlers(mock_adapter)
 
 move_arm_skill = SkillDefinition(
     skill_name="move_arm",
@@ -31,7 +35,7 @@ move_arm_skill = SkillDefinition(
             max_inclusive=True
         ),
     },
-    handler=move_arm,  # 这里可以指定一个处理函数来执行移动机械臂的操作
+    handler=arm_handlers.move_arm,  # 这里可以指定一个处理函数来执行移动机械臂的操作
 )
 
 open_gripper_skill = SkillDefinition(
@@ -40,7 +44,7 @@ open_gripper_skill = SkillDefinition(
     risk_level="low",
     enabled=True,
     params_schema={},
-    handler=open_gripper
+    handler=arm_handlers.open_gripper
 )
 
 close_gripper_skill = SkillDefinition(
@@ -49,7 +53,7 @@ close_gripper_skill = SkillDefinition(
     risk_level="low",
     enabled=True,
     params_schema={},
-    handler=close_gripper
+    handler=arm_handlers.close_gripper
 )
 
 stop_skill = SkillDefinition(
@@ -58,5 +62,5 @@ stop_skill = SkillDefinition(
     risk_level="low",
     enabled=True,
     params_schema={},
-    handler=stop
+    handler=arm_handlers.stop
 )
