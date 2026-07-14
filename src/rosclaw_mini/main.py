@@ -1,10 +1,13 @@
-from rosclaw_mini.skills.registry import BUILTIN_SKILLS
+from rosclaw_mini.skills.arm_skills import build_arm_skills
 from rosclaw_mini.gateway.command.gateway import run_command
 from rosclaw_mini.llm.command_parser import parse_json_command
+from rosclaw_mini.arm.mock_arm import MockArmAdapter
 import uuid
 import json
 
 def main():
+    adapter = MockArmAdapter()
+    skills = build_arm_skills(adapter)
     while True:
         command=input("请输入指令：")
         if command=="exit":
@@ -19,7 +22,7 @@ def main():
             print("JSON 合法，但 Command 数据结构不合法")
             continue
 
-        execute=run_command(cmd, BUILTIN_SKILLS)
+        execute=run_command(cmd, skills)
         print(execute)
 
 if __name__ == "__main__":
