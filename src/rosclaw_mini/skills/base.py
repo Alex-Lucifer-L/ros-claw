@@ -3,7 +3,7 @@ from collections.abc import Callable
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from dataclasses import dataclass
  
-skill_handler=Callable[[Command], ExecutionResult]
+SkillHandler=Callable[[Command], ExecutionResult]
 #定义技能处理函数类型，接受一个 Command 对象作为输入，返回一个 ExecutionResult 对象作为输出。
 
 @dataclass
@@ -47,7 +47,7 @@ class SkillDefinition:
     risk_level: str
     enabled: bool
     params_schema: dict[str, ParamSpec]
-    handler: skill_handler
+    handler: SkillHandler
     allow_extra_params: bool = False
     
 

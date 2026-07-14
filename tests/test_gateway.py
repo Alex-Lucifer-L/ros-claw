@@ -66,3 +66,28 @@ def test_reject_disabled_skill():
     result = run_command(make_command(), skills)
     assert result.success is False
     assert result.message == "技能未启用: move_arm"
+
+def test_run_command_handles_handler_exception():
+    def failing_handler(command):
+        raise RuntimeError("mock arm disconnected")
+
+    failing_skill = SkillDefinition(
+        skill_name="failing_skill",
+        description="test handler exception",
+        risk_level="low",
+        enabled=True,
+        params_schema={},
+        handler=failing_handler,
+    )
+
+    result = run_command(
+        make_command(
+            skill_name="failing_skill",
+            params={},
+        ),
+        {"failing_skill": failing_skill},
+    )
+
+    assert result.success is False
+    assert result.skill_name == "failing_skill"
+    assert result.message == "技能执行失败: mock arm disconnected"
