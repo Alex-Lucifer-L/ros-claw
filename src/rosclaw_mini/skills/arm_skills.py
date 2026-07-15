@@ -1,12 +1,25 @@
 # 这个文件定义了机械臂技能的参数规范和技能定义，包括移动机械臂、打开和关闭机械爪以及停止机械臂动作的技能。
 
-from rosclaw_mini.skills.base import SkillDefinition,ParamSpec
+from rosclaw_mini.skills.base import ParamSpec, SkillDefinition
 from rosclaw_mini.skills.arm_handler import ArmHandlers
 from rosclaw_mini.arm.base import ArmAdapter
+from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
 
 
+def _position_param_spec(axis: AxisLimits | None) -> ParamSpec:
+    return ParamSpec(
+        accepted_types=(int, float),
+        min_value=axis.minimum if axis is not None else None,
+        max_value=axis.maximum if axis is not None else None,
+        min_inclusive=True,
+        max_inclusive=True,
+    )
 
-def build_arm_skills(adapter: ArmAdapter) -> dict[str, SkillDefinition]:
+
+def build_arm_skills(
+    adapter: ArmAdapter,
+    workspace_limits: WorkspaceLimits | None = None,
+) -> dict[str, SkillDefinition]:
     """
     构建机械臂技能的注册表。
     这个函数接收一个机械臂适配器（Adapter）实例，并返回一个包含所有机械臂技能定义的字典。
@@ -14,33 +27,22 @@ def build_arm_skills(adapter: ArmAdapter) -> dict[str, SkillDefinition]:
 
     """
     arm_handlers = ArmHandlers(adapter)
-    
+
     move_arm_skill = SkillDefinition(
         skill_name="move_arm",
         description="移动机械臂到指定目标位置",
         risk_level="medium",
-        enabled=True,
+        # 未提供经过确认的工作空间时失败关闭，避免把示例范围用于实机。
+        enabled=workspace_limits is not None,
         params_schema={
-            "x": ParamSpec(
-                accepted_types=(int, float),
-                min_value=0,
-                max_value=1,
-                min_inclusive=False,
-                max_inclusive=True
+            "x": _position_param_spec(
+                workspace_limits.x if workspace_limits is not None else None
             ),
-            "y": ParamSpec(
-                accepted_types=(int, float),
-                min_value=0,
-                max_value=1,
-                min_inclusive=False,
-                max_inclusive=True
+            "y": _position_param_spec(
+                workspace_limits.y if workspace_limits is not None else None
             ),
-            "z": ParamSpec(
-                accepted_types=(int, float),
-                min_value=0,
-                max_value=1,
-                min_inclusive=False,
-                max_inclusive=True
+            "z": _position_param_spec(
+                workspace_limits.z if workspace_limits is not None else None
             ),
         },
         handler=arm_handlers.move_arm,  # 这里可以指定一个处理函数来执行移动机械臂的操作

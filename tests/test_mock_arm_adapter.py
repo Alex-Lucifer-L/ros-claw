@@ -4,13 +4,13 @@ from rosclaw_mini.arm.mock_arm import MockArmAdapter
 def test_mock_adapter_connect_and_disconnect():
     adapter = MockArmAdapter()
 
-    assert adapter.is_connected() is False
+    assert adapter.is_connected is False
 
     adapter.connect()
-    assert adapter.is_connected() is True
+    assert adapter.is_connected is True
 
     adapter.disconnect()
-    assert adapter.is_connected() is False
+    assert adapter.is_connected is False
 
 
 def test_mock_adapter_move_to():

@@ -3,12 +3,20 @@ from dataclasses import replace
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.gateway.command.gateway import run_command
+from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
 from rosclaw_mini.skills.arm_skills import build_arm_skills
 from rosclaw_mini.skills.base import SkillDefinition
 
 
 adapter = MockArmAdapter()
-skills = build_arm_skills(adapter)
+skills = build_arm_skills(
+    adapter,
+    workspace_limits=WorkspaceLimits(
+        x=AxisLimits(0.0, 1.0),
+        y=AxisLimits(-1.0, 1.0),
+        z=AxisLimits(0.0, 1.0),
+    ),
+)
 
 
 def make_command(skill_name="move_arm", params=None):

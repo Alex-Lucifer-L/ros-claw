@@ -1,9 +1,17 @@
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
+from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
 from rosclaw_mini.skills.arm_skills import build_arm_skills
 from rosclaw_mini.skills.validator import validate_skill_params
 
 
-skills = build_arm_skills(MockArmAdapter())
+skills = build_arm_skills(
+    MockArmAdapter(),
+    workspace_limits=WorkspaceLimits(
+        x=AxisLimits(0.0, 1.0),
+        y=AxisLimits(-1.0, 1.0),
+        z=AxisLimits(0.0, 1.0),
+    ),
+)
 
 
 def test_accept_valid_move_arm_params():
