@@ -1,9 +1,13 @@
-from rosclaw_mini.skills.registry import BUILTIN_SKILLS
+from rosclaw_mini.arm.mock_arm import MockArmAdapter
+from rosclaw_mini.skills.arm_skills import build_arm_skills
 from rosclaw_mini.skills.validator import validate_skill_params
 
 
+skills = build_arm_skills(MockArmAdapter())
+
+
 def test_accept_valid_move_arm_params():
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     is_valid, message = validate_skill_params(
         skill,
@@ -15,7 +19,7 @@ def test_accept_valid_move_arm_params():
 
 
 def test_reject_missing_required_param():
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     is_valid, message = validate_skill_params(
         skill,
@@ -27,7 +31,7 @@ def test_reject_missing_required_param():
 
 
 def test_reject_wrong_param_type():
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     is_valid, message = validate_skill_params(
         skill,
@@ -39,7 +43,7 @@ def test_reject_wrong_param_type():
 
 
 def test_reject_bool_as_number():
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     is_valid, message = validate_skill_params(
         skill,
@@ -51,7 +55,7 @@ def test_reject_bool_as_number():
 
 
 def test_reject_extra_param():
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     is_valid, message = validate_skill_params(
         skill,
@@ -68,7 +72,7 @@ def test_reject_extra_param():
 
 
 def test_validate_gripper_params():
-    skill = BUILTIN_SKILLS["open_gripper"]
+    skill = skills["open_gripper"]
 
     valid_result, valid_message = validate_skill_params(skill, {})
 

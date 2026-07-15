@@ -1,7 +1,11 @@
+from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.command_schema.commands import Command
 from rosclaw_mini.safety.checker import check_command
+from rosclaw_mini.skills.arm_skills import build_arm_skills
 from rosclaw_mini.skills.base import ParamSpec, SkillDefinition
-from rosclaw_mini.skills.registry import BUILTIN_SKILLS
+
+
+skills = build_arm_skills(MockArmAdapter())
 
 
 def make_command(skill_name: str, params: dict) -> Command:
@@ -18,7 +22,7 @@ def test_accept_valid_move_arm_command():
         "move_arm",
         {"x": 0.5, "y": 0.4, "z": 0.3},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -31,7 +35,7 @@ def test_reject_value_equal_to_exclusive_minimum():
         "move_arm",
         {"x": 0, "y": 0.4, "z": 0.3},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -44,7 +48,7 @@ def test_reject_value_below_minimum():
         "move_arm",
         {"x": -0.1, "y": 0.4, "z": 0.3},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -57,7 +61,7 @@ def test_accept_value_equal_to_inclusive_maximum():
         "move_arm",
         {"x": 1, "y": 0.4, "z": 0.3},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -69,7 +73,7 @@ def test_reject_value_above_maximum():
         "move_arm",
         {"x": 1.1, "y": 0.4, "z": 0.3},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -82,7 +86,7 @@ def test_reject_missing_required_parameter():
         "move_arm",
         {"x": 0.5, "y": 0.4},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -95,7 +99,7 @@ def test_reject_wrong_parameter_type():
         "move_arm",
         {"x": "0.5", "y": 0.4, "z": 0.3},
     )
-    skill = BUILTIN_SKILLS["move_arm"]
+    skill = skills["move_arm"]
 
     result = check_command(command, skill)
 
@@ -105,7 +109,7 @@ def test_reject_wrong_parameter_type():
 
 def test_accept_skill_without_parameters():
     command = make_command("open_gripper", {})
-    skill = BUILTIN_SKILLS["open_gripper"]
+    skill = skills["open_gripper"]
 
     result = check_command(command, skill)
 
@@ -128,7 +132,7 @@ def test_generic_checker_supports_different_boundaries():
                 max_inclusive=False,
             )
         },
-        handler=BUILTIN_SKILLS["stop"].handler,
+        handler=skills["stop"].handler,
     )
 
     minimum_command = make_command(

@@ -1,9 +1,14 @@
 from dataclasses import replace
 
+from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.gateway.command.gateway import run_command
+from rosclaw_mini.skills.arm_skills import build_arm_skills
 from rosclaw_mini.skills.base import SkillDefinition
-from rosclaw_mini.skills.registry import BUILTIN_SKILLS
+
+
+adapter = MockArmAdapter()
+skills = build_arm_skills(adapter)
 
 
 def make_command(skill_name="move_arm", params=None):
@@ -16,9 +21,11 @@ def make_command(skill_name="move_arm", params=None):
 
 
 def test_run_valid_command():
-    result = run_command(make_command(), BUILTIN_SKILLS)
+    result = run_command(make_command(), skills)
+
     assert result.success is True
     assert result.skill_name == "move_arm"
+    assert adapter.position == (0.5, 0.4, 0.3)
 
 
 def test_run_command_uses_registered_handler():
@@ -49,23 +56,27 @@ def test_run_command_uses_registered_handler():
 
 
 def test_reject_unsafe_command():
-    result = run_command(make_command(params={"x": 2.0, "y": 0.4, "z": 0.3}), BUILTIN_SKILLS)
+    result = run_command(
+        make_command(params={"x": 2.0, "y": 0.4, "z": 0.3}),
+        skills,
+    )
     assert result.success is False
     assert "x" in result.message
 
 
 def test_reject_unknown_skill():
-    result = run_command(make_command("destroy_arm", {}), BUILTIN_SKILLS)
+    result = run_command(make_command("destroy_arm", {}), skills)
     assert result.success is False
     assert result.message == "技能不存在: destroy_arm"
 
 
 def test_reject_disabled_skill():
-    skills = dict(BUILTIN_SKILLS)
-    skills["move_arm"] = replace(BUILTIN_SKILLS["move_arm"], enabled=False)
-    result = run_command(make_command(), skills)
+    disabled_skills = dict(skills)
+    disabled_skills["move_arm"] = replace(skills["move_arm"], enabled=False)
+    result = run_command(make_command(), disabled_skills)
     assert result.success is False
     assert result.message == "技能未启用: move_arm"
+
 
 def test_run_command_handles_handler_exception():
     def failing_handler(command):
