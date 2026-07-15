@@ -27,6 +27,28 @@ class ArmAdapter(ABC):
         4. 生成 ExecutionResult
     """
 
+    @property
+    @abstractmethod
+    def is_connected(self) -> bool:
+        """
+        检查机械臂是否已连接。
+        """
+        pass
+
+    @abstractmethod
+    def connect(self) -> None:
+        """
+        连接机械臂。
+        """
+        pass
+
+    @abstractmethod
+    def disconnect(self) -> None:
+        """
+        断开机械臂连接。
+        """
+        pass
+
     @abstractmethod
     def move_to(
         self,

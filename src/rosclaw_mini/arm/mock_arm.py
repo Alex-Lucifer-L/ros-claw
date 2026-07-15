@@ -13,6 +13,8 @@ class MockArmAdapter(ArmAdapter):
     """
 
     def __init__(self):
+
+        self._is_connected: bool = False  # 模拟机械臂连接状态。
         # 模拟机械臂当前所在位置。
         self.position: tuple[float, float, float] | None = None
 
@@ -22,6 +24,21 @@ class MockArmAdapter(ArmAdapter):
 
         # 模拟机械臂是否执行了停止命令。
         self.is_stopped: bool = False
+
+    def is_connected(self) -> bool:
+        # 返回模拟的机械臂连接状态。
+        return self._is_connected
+
+
+    def connect(self) -> None:
+        # 模拟连接机械臂。
+        self._is_connected = True   
+
+    def disconnect(self) -> None:
+        # 模拟断开机械臂连接。
+        self._is_connected = False
+
+    
 
     def move_to(
         self,
