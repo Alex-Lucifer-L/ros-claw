@@ -24,7 +24,7 @@ class MockArmAdapter(ArmAdapter):
 
         # 模拟机械臂是否执行了停止命令。
         self.is_stopped: bool = False
-
+    @property
     def is_connected(self) -> bool:
         # 返回模拟的机械臂连接状态。
         return self._is_connected
