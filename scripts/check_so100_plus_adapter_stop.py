@@ -9,6 +9,7 @@ import time
 
 from rosclaw_mini.arm.so100_plus import (
     GRIPPER_MOTOR_NAME,
+    SO100_PLUS_REAL_HARDWARE_PROFILE,
     SO100PlusAdapter,
     SO100PlusGripperConfig,
     SO100PlusMotionStoppedError,
@@ -37,8 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime-acceleration",
         type=int,
-        default=35,
-        help="本次测试的运行时加速度，范围 0-254，默认 35",
+        default=SO100_PLUS_REAL_HARDWARE_PROFILE.runtime_acceleration,
+        help="本次测试的运行时加速度，范围 0-254，默认已验证值 35",
     )
     parser.add_argument(
         "--acknowledge-stop-test-risk",

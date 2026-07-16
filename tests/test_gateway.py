@@ -36,6 +36,18 @@ def test_run_valid_command():
     assert adapter.position == (0.5, 0.4, 0.3)
 
 
+def test_run_disable_torque_command_through_registered_handler():
+    adapter.connect()
+
+    result = run_command(
+        make_command(skill_name="disable_torque", params={}),
+        skills,
+    )
+
+    assert result.success is True
+    assert adapter.torque_enabled is False
+
+
 def test_run_command_uses_registered_handler():
     def custom_handler(command):
         return ExecutionResult(

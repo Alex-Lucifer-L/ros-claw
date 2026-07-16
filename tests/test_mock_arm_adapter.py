@@ -42,3 +42,12 @@ def test_mock_adapter_stop_and_resume_movement():
 
     adapter.move_to(0.1, 0.2, 0.3)
     assert adapter.is_stopped is False
+
+
+def test_mock_adapter_disables_torque():
+    adapter = MockArmAdapter()
+    adapter.connect()
+
+    adapter.disable_torque()
+
+    assert adapter.torque_enabled is False

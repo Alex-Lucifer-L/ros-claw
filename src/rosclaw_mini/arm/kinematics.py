@@ -19,6 +19,11 @@ from rosclaw_mini.safety.limits import (
 
 
 SO100_PLUS_DRIVER_TO_MODEL_SIGNS = (-1, -1, 1, -1, 1, 1)
+SO100_PLUS_JOYCON_REST_RADIANS = (0.0, -3.1, 3.0, 0.0, 0.0, 1.57)
+# X 来自 lerobot_kinematics 源码中预留但未启用的 E18=tx(0.10127)。
+# Y/Z 来自 MuJoCo 两根夹指最前端内侧接触面的共同高度中心和间隙中点。
+# 三者共同描述第六关节运动学末端到固定夹持中心的工具局部坐标。
+SO100_PLUS_GRIPPER_TCP_OFFSET_M = (0.10127, -0.00690, 0.00118)
 
 
 class KinematicsError(RuntimeError):
@@ -79,6 +84,7 @@ class SO100PlusKinematics:
         self,
         robot: Any | None = None,
         *,
+        tcp_offset_m: Sequence[float] = SO100_PLUS_GRIPPER_TCP_OFFSET_M,
         position_tolerance_m: float = 0.0001,
         orientation_matrix_tolerance: float = 0.0001,
     ) -> None:
@@ -91,6 +97,17 @@ class SO100PlusKinematics:
             raise ValueError("姿态复算容差必须是有限正数。")
 
         self.robot = robot if robot is not None else self._load_default_robot()
+        self.tcp_offset_m = _finite_vector(
+            tcp_offset_m,
+            expected_length=3,
+            label="夹爪 TCP 偏移",
+        )
+        self._flange_to_tcp_transform = np.eye(4, dtype=float)
+        self._flange_to_tcp_transform[:3, 3] = self.tcp_offset_m
+        self._tcp_to_flange_transform = np.eye(4, dtype=float)
+        self._tcp_to_flange_transform[:3, 3] = tuple(
+            -value for value in self.tcp_offset_m
+        )
         self.position_tolerance_m = float(position_tolerance_m)
         self.orientation_matrix_tolerance = float(
             orientation_matrix_tolerance
@@ -142,6 +159,8 @@ class SO100PlusKinematics:
         self,
         joint_radians: Sequence[float],
     ) -> tuple[float, float, float]:
+        """返回夹爪尖端之间 TCP 在机械臂底座坐标系中的位置。"""
+
         joints = _finite_vector(
             joint_radians,
             expected_length=len(SO100_PLUS_ARM_JOINT_NAMES),
@@ -157,7 +176,7 @@ class SO100PlusKinematics:
         *,
         joint_limits: JointLimits | None = None,
     ) -> tuple[float, ...]:
-        """保持当前末端姿态，只求解新的 x/y/z。"""
+        """保持当前夹爪 TCP 姿态，只求解新的绝对 x/y/z。"""
 
         current = _finite_vector(
             current_joint_radians,
@@ -167,7 +186,7 @@ class SO100PlusKinematics:
         target = _finite_vector(
             target_position_m,
             expected_length=3,
-            label="末端目标",
+            label="夹爪 TCP 目标",
         )
         current_transform = self._forward_transform(current)
 
@@ -181,9 +200,12 @@ class SO100PlusKinematics:
 
         target_transform = current_transform.copy()
         target_transform[:3, 3] = np.asarray(target)
+        target_flange_transform = (
+            target_transform @ self._tcp_to_flange_transform
+        )
 
         solution = self.robot.ikine_LM(
-            Tep=target_transform,
+            Tep=target_flange_transform,
             q0=np.asarray(current, dtype=float),
             ilimit=100,
             slimit=5,
@@ -270,6 +292,19 @@ class SO100PlusKinematics:
         self,
         joint_radians: Sequence[float],
     ) -> np.ndarray:
+        """返回底座到夹爪 TCP 的齐次变换。"""
+
+        return (
+            self._forward_flange_transform(joint_radians)
+            @ self._flange_to_tcp_transform
+        )
+
+    def _forward_flange_transform(
+        self,
+        joint_radians: Sequence[float],
+    ) -> np.ndarray:
+        """返回第三方六轴模型原始末端的齐次变换。"""
+
         transform_object = self.robot.fkine(
             np.asarray(joint_radians, dtype=float)
         )

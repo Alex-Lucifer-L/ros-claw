@@ -33,7 +33,7 @@ class ArmHandlers:
 
     def move_arm(self, command: Command) -> ExecutionResult:
         """
-        将 move_arm Command 映射为 adapter.move_to() 原子操作。
+        将 move_arm Command 映射为夹爪 TCP 的 move_to() 原子操作。
         """
 
         # 从系统 Command 中取出 Skill 参数。
@@ -50,7 +50,7 @@ class ArmHandlers:
             command_id=command.command_id,
             skill_name=command.skill_name,
             success=True,
-            message=f"机械臂已移动到位置: {x}, {y}, {z}",
+            message=f"夹爪 TCP 已移动到位置: {x}, {y}, {z}",
         )
 
     def open_gripper(self, command: Command) -> ExecutionResult:
@@ -95,4 +95,16 @@ class ArmHandlers:
             skill_name=command.skill_name,
             success=True,
             message="机械臂已停止所有动作",
+        )
+
+    def disable_torque(self, command: Command) -> ExecutionResult:
+        """将 disable_torque Command 映射为力矩关闭原子操作。"""
+
+        self.adapter.disable_torque()
+
+        return ExecutionResult(
+            command_id=command.command_id,
+            skill_name=command.skill_name,
+            success=True,
+            message="机械臂力矩已关闭",
         )

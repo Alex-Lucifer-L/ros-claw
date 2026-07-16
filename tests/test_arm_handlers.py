@@ -24,7 +24,7 @@ def test_move_arm_handler_calls_adapter():
     assert result.success is True
     assert result.command_id == "cmd-001"
     assert result.skill_name == "move_arm"
-    assert result.message == "机械臂已移动到位置: 0.5, 0.4, 0.3"
+    assert result.message == "夹爪 TCP 已移动到位置: 0.5, 0.4, 0.3"
 
 
 def make_command(command_id: str, skill_name: str) -> Command:
@@ -67,3 +67,17 @@ def test_stop_handler_calls_adapter():
     assert adapter.is_stopped is True
     assert result.success is True
     assert result.message == "机械臂已停止所有动作"
+
+
+def test_disable_torque_handler_calls_adapter():
+    adapter = MockArmAdapter()
+    adapter.connect()
+    handlers = ArmHandlers(adapter)
+
+    result = handlers.disable_torque(
+        make_command("cmd-005", "disable_torque")
+    )
+
+    assert adapter.torque_enabled is False
+    assert result.success is True
+    assert result.message == "机械臂力矩已关闭"

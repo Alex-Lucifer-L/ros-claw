@@ -3,13 +3,18 @@ from pathlib import Path
 
 import pytest
 
+import rosclaw_mini.arm.so100_plus_factory as factory_module
 from rosclaw_mini.arm.so100_plus_factory import (
     SO100_PLUS_MOTOR_NAMES,
     SO100_PLUS_MOTORS,
+    SO100PlusCameraConfig,
     SO100PlusConfigurationError,
     SO100PlusRobotConfig,
+    create_so100_plus_cameras,
+    create_so100_plus_readonly_robot,
     create_so100_plus_robot,
     validate_so100_plus_config,
+    validate_so100_plus_camera_configs,
 )
 
 
@@ -123,6 +128,72 @@ def test_preflight_rejects_wrong_calibration_vector_length(tmp_path):
         validate_so100_plus_config(config)
 
 
+def test_camera_factory_builds_unconnected_readme_compatible_camera():
+    class FakeOpenCVCamera:
+        def __init__(self, device, **kwargs):
+            self.device = device
+            self.kwargs = kwargs
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise AssertionError("摄像头工厂不应连接设备")
+
+    cameras = create_so100_plus_cameras(
+        (SO100PlusCameraConfig(name="right", device="/dev/null"),),
+        opencv_camera_class=FakeOpenCVCamera,
+    )
+
+    camera = cameras["right"]
+    assert camera.device == "/dev/null"
+    assert camera.kwargs == {
+        "fps": 60,
+        "width": 640,
+        "height": 480,
+        "color_mode": "rgb",
+    }
+    assert camera.connect_calls == 0
+
+
+def test_camera_preflight_rejects_missing_device():
+    configs = (
+        SO100PlusCameraConfig(
+            name="right",
+            device="/dev/definitely-missing-rosclaw-camera",
+        ),
+    )
+
+    with pytest.raises(SO100PlusConfigurationError, match="摄像头设备不存在"):
+        validate_so100_plus_camera_configs(configs)
+
+
+def test_camera_preflight_rejects_duplicate_names():
+    configs = (
+        SO100PlusCameraConfig(name="right", device="/dev/null"),
+        SO100PlusCameraConfig(name="right", device="/dev/null"),
+    )
+
+    with pytest.raises(SO100PlusConfigurationError, match="摄像头名称重复"):
+        validate_so100_plus_camera_configs(configs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"name": "right-camera"}, "name 必须是简单名称"),
+        ({"device": "relative-video0"}, "必须是绝对路径"),
+        ({"fps": 0}, "fps 必须是正整数"),
+        ({"fps": 121}, "fps 不能超过 120"),
+        ({"color_mode": "gray"}, "color_mode 只能是"),
+    ],
+)
+def test_camera_preflight_rejects_invalid_config(kwargs, message):
+    values = {"name": "right", "device": "/dev/null", **kwargs}
+
+    with pytest.raises(SO100PlusConfigurationError, match=message):
+        validate_so100_plus_camera_configs((SO100PlusCameraConfig(**values),))
+
+
 def test_factory_builds_unconnected_single_follower_robot(tmp_path):
     class FakeMotorsBus:
         def __init__(self, port, motors):
@@ -185,4 +256,151 @@ def test_factory_validates_before_constructing_driver_objects(tmp_path):
             config,
             motors_bus_class=DriverMustNotBeConstructed,
             manipulator_robot_class=DriverMustNotBeConstructed,
+        )
+
+
+def test_normal_factory_uses_lightweight_feetech_import(monkeypatch, tmp_path):
+    class FakeMotorsBus:
+        def __init__(self, port, motors):
+            self.port = port
+            self.motors = motors
+
+    class FakeManipulatorRobot:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        factory_module,
+        "_import_feetech_motors_bus_without_optional_app_dependencies",
+        lambda: FakeMotorsBus,
+    )
+    calibration_dir = write_calibration(tmp_path)
+    config = SO100PlusRobotConfig(
+        port="/dev/null",
+        calibration_dir=calibration_dir,
+        follower_name="right",
+    )
+
+    robot = create_so100_plus_robot(
+        config,
+        manipulator_robot_class=FakeManipulatorRobot,
+    )
+
+    follower_bus = robot.kwargs["follower_arms"]["right"]
+    assert isinstance(follower_bus, FakeMotorsBus)
+    assert follower_bus.port == "/dev/null"
+    assert follower_bus.motors == SO100_PLUS_MOTORS
+
+
+def test_normal_factory_uses_lightweight_manipulator_import(monkeypatch, tmp_path):
+    class FakeMotorsBus:
+        def __init__(self, port, motors):
+            self.port = port
+            self.motors = motors
+
+    class FakeManipulatorRobot:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        factory_module,
+        "_import_manipulator_robot_without_required_torch_runtime",
+        lambda: FakeManipulatorRobot,
+    )
+    calibration_dir = write_calibration(tmp_path)
+    config = SO100PlusRobotConfig(
+        port="/dev/null",
+        calibration_dir=calibration_dir,
+        follower_name="right",
+    )
+
+    robot = create_so100_plus_robot(
+        config,
+        motors_bus_class=FakeMotorsBus,
+    )
+
+    assert isinstance(robot, FakeManipulatorRobot)
+    assert robot.kwargs["robot_type"] == "so100"
+
+
+def test_readonly_factory_loads_calibration_without_any_motor_write(tmp_path):
+    class FakeMotorsBus:
+        def __init__(self, port, motors):
+            self.port = port
+            self.motors = motors
+            self.is_connected = False
+            self.connect_calls = 0
+            self.disconnect_calls = 0
+            self.set_calibration_calls = []
+            self.write_calls = []
+
+        @property
+        def motor_names(self):
+            return list(self.motors)
+
+        def connect(self):
+            self.connect_calls += 1
+            self.is_connected = True
+
+        def set_calibration(self, calibration):
+            self.set_calibration_calls.append(calibration)
+
+        def write(self, *args, **kwargs):
+            self.write_calls.append((args, kwargs))
+            raise AssertionError("只读 Robot 不应写电机")
+
+        def disconnect(self):
+            self.disconnect_calls += 1
+            self.is_connected = False
+
+    calibration = make_calibration()
+    calibration_dir = write_calibration(tmp_path, calibration)
+    config = SO100PlusRobotConfig(
+        port="/dev/null",
+        calibration_dir=calibration_dir,
+        follower_name="right",
+    )
+
+    robot = create_so100_plus_readonly_robot(
+        config,
+        motors_bus_class=FakeMotorsBus,
+    )
+    bus = robot.follower_arms["right"]
+
+    assert robot.is_connected is False
+    assert bus.connect_calls == 0
+    assert bus.set_calibration_calls == []
+
+    robot.connect()
+
+    assert robot.is_connected is True
+    assert bus.connect_calls == 1
+    assert bus.set_calibration_calls == [calibration]
+    assert bus.write_calls == []
+
+    robot.disconnect()
+
+    assert robot.is_connected is False
+    assert bus.disconnect_calls == 1
+    assert bus.write_calls == []
+
+
+def test_readonly_factory_validates_before_constructing_bus(tmp_path):
+    class BusMustNotBeConstructed:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("配置无效时不应构造总线")
+
+    config = SO100PlusRobotConfig(
+        port="/dev/null",
+        calibration_dir=tmp_path / "missing-calibration",
+        follower_name="right",
+    )
+
+    with pytest.raises(
+        SO100PlusConfigurationError,
+        match="已阻止 LeRobot 自动进入校准",
+    ):
+        create_so100_plus_readonly_robot(
+            config,
+            motors_bus_class=BusMustNotBeConstructed,
         )

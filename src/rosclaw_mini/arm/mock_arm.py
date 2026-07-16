@@ -15,7 +15,7 @@ class MockArmAdapter(ArmAdapter):
     def __init__(self):
 
         self._is_connected: bool = False  # 模拟机械臂连接状态。
-        # 模拟机械臂当前所在位置。
+        # 模拟夹爪 TCP 在机械臂底座坐标系中的绝对位置。
         self.position: tuple[float, float, float] | None = None
 
         # 模拟夹爪状态：
@@ -24,6 +24,7 @@ class MockArmAdapter(ArmAdapter):
 
         # 模拟机械臂是否执行了停止命令。
         self.is_stopped: bool = False
+        self.torque_enabled: bool = False
     @property
     def is_connected(self) -> bool:
         # 返回模拟的机械臂连接状态。
@@ -32,11 +33,13 @@ class MockArmAdapter(ArmAdapter):
 
     def connect(self) -> None:
         # 模拟连接机械臂。
-        self._is_connected = True   
+        self._is_connected = True
+        self.torque_enabled = True
 
     def disconnect(self) -> None:
         # 模拟断开机械臂连接。
         self._is_connected = False
+        self.torque_enabled = False
 
     
 
@@ -46,7 +49,7 @@ class MockArmAdapter(ArmAdapter):
         y: float,
         z: float,
     ) -> None:
-        # 模拟机械臂移动：不控制硬件，只记录新的目标位置。
+        # 模拟 TCP 移动：不控制硬件，只记录新的目标位置。
         self.position = (x, y, z)
         self.is_stopped = False
 
@@ -61,3 +64,7 @@ class MockArmAdapter(ArmAdapter):
     def stop(self) -> None:
         # 模拟停止机械臂。
         self.is_stopped = True
+
+    def disable_torque(self) -> None:
+        # 模拟关闭全部关节力矩。
+        self.torque_enabled = False

@@ -8,7 +8,11 @@ from rosclaw_mini.safety.limits import (
     LimitConfigurationError,
     LimitViolationError,
     MotionLimits,
+    SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS,
     WorkspaceLimits,
+    build_so100_plus_right_follower_execution_joint_limits,
+    build_so100_plus_right_follower_local_joint_limits,
+    choose_so100_plus_right_follower_base_test_target,
 )
 
 
@@ -81,3 +85,113 @@ def test_motion_limits_combines_workspace_and_joint_limits():
 
     limits.validate_target_position((0.2, 0.0, 0.2))
     limits.validate_joint_step((0.0, 0.0), (0.05, 0.1))
+
+
+def test_measured_right_follower_shoulder_rotation_limits_accept_endpoints():
+    limits = SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS
+
+    assert limits.validate(-19.599609, "shoulder_rotation_joint") == pytest.approx(
+        -19.599609
+    )
+    assert limits.validate(31.201172, "shoulder_rotation_joint") == pytest.approx(
+        31.201172
+    )
+
+
+@pytest.mark.parametrize("angle", [-19.6875, 31.2890625])
+def test_measured_right_follower_shoulder_rotation_limits_reject_one_tick_beyond(
+    angle,
+):
+    limits = SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS
+
+    with pytest.raises(LimitViolationError, match="shoulder_rotation_joint"):
+        limits.validate(angle, "shoulder_rotation_joint")
+
+
+def test_right_follower_local_limits_allow_cross_turn_current_joint():
+    current = (0.0, math.radians(-191.0), 0.0, 0.0, 0.0, 0.0)
+
+    limits = build_so100_plus_right_follower_local_joint_limits(current)
+
+    assert limits.validate_position(current) == pytest.approx(current)
+    assert limits.lower_radians[1] == pytest.approx(current[1] - 0.1)
+    assert limits.upper_radians[1] == pytest.approx(current[1] + 0.1)
+
+
+def test_right_follower_local_limits_can_use_smaller_internal_steps():
+    current = (0.0,) * 6
+
+    limits = build_so100_plus_right_follower_local_joint_limits(
+        current,
+        max_delta_radians=0.1,
+        max_step_radians=math.radians(1.0),
+    )
+
+    assert limits.max_step_radians == pytest.approx((math.radians(1.0),) * 6)
+    assert limits.lower_radians == pytest.approx((-0.1,) * 6)
+    assert limits.upper_radians == pytest.approx((0.1,) * 6)
+
+
+def test_right_follower_local_limits_keep_measured_base_boundary():
+    current = (math.radians(-30.0), 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    limits = build_so100_plus_right_follower_local_joint_limits(current)
+
+    assert math.degrees(limits.lower_radians[0]) == pytest.approx(-31.201172)
+    assert math.degrees(limits.upper_radians[0]) == pytest.approx(
+        math.degrees(current[0] + 0.1)
+    )
+
+
+def test_right_follower_local_limits_reject_base_outside_measured_range():
+    current = (math.radians(-32.0), 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    with pytest.raises(LimitViolationError, match="当前底座关节"):
+        build_so100_plus_right_follower_local_joint_limits(current)
+
+
+def test_execution_limits_remove_total_delta_cap_but_keep_internal_step():
+    current = (0.0, math.radians(-191.0), 3.0, 0.0, 0.0, 1.57)
+    limits = build_so100_plus_right_follower_execution_joint_limits(
+        current,
+        max_step_radians=math.radians(2.0),
+    )
+
+    target = (0.0, math.radians(-170.0), 2.5, 0.2, 0.1, 1.2)
+    assert limits.validate_position(target) == pytest.approx(target)
+    with pytest.raises(LimitViolationError, match="单步变化"):
+        limits.validate_step(current, target)
+    assert limits.max_step_radians == pytest.approx(
+        (math.radians(2.0),) * 6
+    )
+
+
+def test_execution_limits_only_extend_out_of_model_current_toward_model():
+    current = (0.0, math.radians(-191.0), 3.0, 0.0, 0.0, 1.57)
+    limits = build_so100_plus_right_follower_execution_joint_limits(
+        current,
+        max_step_radians=math.radians(2.0),
+    )
+
+    assert limits.lower_radians[1] == pytest.approx(current[1])
+    limits.validate_position(
+        (0.0, math.radians(-180.0), 3.0, 0.0, 0.0, 1.57)
+    )
+    with pytest.raises(LimitViolationError, match="shoulder_pitch_joint"):
+        limits.validate_position(
+            (0.0, math.radians(-192.0), 3.0, 0.0, 0.0, 1.57)
+        )
+
+
+def test_base_test_target_chooses_side_with_more_headroom():
+    assert choose_so100_plus_right_follower_base_test_target(0.0) == pytest.approx(
+        8.0
+    )
+    assert choose_so100_plus_right_follower_base_test_target(25.0) == pytest.approx(
+        17.0
+    )
+
+
+def test_base_test_target_rejects_unmeasured_current_position():
+    with pytest.raises(LimitViolationError, match="当前底座关节"):
+        choose_so100_plus_right_follower_base_test_target(40.0)

@@ -17,6 +17,7 @@ skills = build_arm_skills(
 def test_find_existing_skills():
     assert find_skill("move_arm", skills).skill_name == "move_arm"
     assert find_skill("open_gripper", skills).skill_name == "open_gripper"
+    assert find_skill("disable_torque", skills).skill_name == "disable_torque"
 
 
 def test_find_unknown_skill():
@@ -28,3 +29,4 @@ def test_move_skill_is_disabled_without_explicit_workspace_limits():
 
     assert skills_without_limits["move_arm"].enabled is False
     assert skills_without_limits["open_gripper"].enabled is True
+    assert skills_without_limits["disable_torque"].enabled is True

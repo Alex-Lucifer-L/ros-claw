@@ -19,6 +19,7 @@ class ArmAdapter(ABC):
         adapter.open_gripper()
         adapter.close_gripper()
         adapter.stop()
+        adapter.disable_torque()
 
     ArmAdapter 只负责统一硬件操作，不负责：
         1. 解析 Command
@@ -57,8 +58,8 @@ class ArmAdapter(ABC):
         z: float,
     ) -> None:
         """
-        将不同厂商的机械臂移动函数，
-        统一映射为 move_to(x, y, z)。
+        将夹爪工具中心点（TCP）移动到机械臂底座坐标系中的
+        绝对位置，并统一映射为 move_to(x, y, z)。
         """
         pass
 
@@ -84,4 +85,9 @@ class ArmAdapter(ABC):
         将不同厂商的停止函数，
         统一映射为 stop()。
         """
+        pass
+
+    @abstractmethod
+    def disable_torque(self) -> None:
+        """关闭全部关节力矩，使机械臂变为可手动移动状态。"""
         pass

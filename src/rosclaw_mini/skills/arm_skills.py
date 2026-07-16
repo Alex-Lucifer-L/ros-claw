@@ -30,7 +30,7 @@ def build_arm_skills(
 
     move_arm_skill = SkillDefinition(
         skill_name="move_arm",
-        description="移动机械臂到指定目标位置",
+        description="移动夹爪工具中心点到指定绝对位置",
         risk_level="medium",
         # 未提供经过确认的工作空间时失败关闭，避免把示例范围用于实机。
         enabled=workspace_limits is not None,
@@ -75,9 +75,19 @@ def build_arm_skills(
         handler=arm_handlers.stop
     )
 
+    disable_torque_skill = SkillDefinition(
+        skill_name="disable_torque",
+        description="关闭机械臂全部关节力矩，使机械臂变软",
+        risk_level="medium",
+        enabled=True,
+        params_schema={},
+        handler=arm_handlers.disable_torque,
+    )
+
     return {
         "move_arm": move_arm_skill,
         "open_gripper": open_gripper_skill,
         "close_gripper": close_gripper_skill,
         "stop": stop_skill,
+        "disable_torque": disable_torque_skill,
     }

@@ -98,7 +98,7 @@ class AxisLimits:
 
 @dataclass(frozen=True)
 class WorkspaceLimits:
-    """末端位置的三轴闭区间，统一使用米。"""
+    """夹爪 TCP 绝对位置的三轴闭区间，统一使用米。"""
 
     x: AxisLimits
     y: AxisLimits
@@ -223,13 +223,15 @@ class MotionLimits:
         position_m: Sequence[float],
     ) -> tuple[float, float, float]:
         if isinstance(position_m, (str, bytes)):
-            raise LimitViolationError("末端目标需要 3 个坐标值。")
+            raise LimitViolationError("夹爪 TCP 目标需要 3 个坐标值。")
         try:
             position = tuple(position_m)
         except TypeError as error:
-            raise LimitViolationError("末端目标需要 3 个坐标值。") from error
+            raise LimitViolationError(
+                "夹爪 TCP 目标需要 3 个坐标值。"
+            ) from error
         if len(position) != 3:
-            raise LimitViolationError("末端目标需要 3 个坐标值。")
+            raise LimitViolationError("夹爪 TCP 目标需要 3 个坐标值。")
         return self.workspace.validate_position(*position)
 
     def validate_joint_step(
@@ -257,3 +259,190 @@ SO100_PLUS_MODEL_JOINT_LIMITS = JointLimits(
     upper_radians=(2.2, 0.2, 3.14158, 1.8, 1.5, 3.14158),
     max_step_radians=(0.1,) * 6,
 )
+
+# 2026-07-16 在 right_follower 扭矩全部关闭时，由用户手动移动安装了
+# 底座的 shoulder_rotation_joint，并选择日常使用不会碰到底座或拉扯
+# 线缆的两侧位置。这里保存的是 LeRobot 校准后的驱动角度，不是模型
+# 弧度；它只认证这一个关节，不能冒充完整的实机 JointLimits。
+SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS = AxisLimits(
+    minimum=-19.599609,
+    maximum=31.201172,
+)
+
+
+def choose_so100_plus_right_follower_base_test_target(
+    current_driver_degrees: float,
+    *,
+    delta_degrees: float = 8.0,
+    boundary_margin_degrees: float = 2.0,
+) -> float:
+    """在实测底座范围内选择空余更大一侧的明显诊断目标。"""
+
+    current = SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.validate(
+        current_driver_degrees,
+        "当前底座关节",
+    )
+    delta = _finite_number(
+        delta_degrees,
+        "底座诊断变化",
+        LimitConfigurationError,
+    )
+    margin = _finite_number(
+        boundary_margin_degrees,
+        "底座边界余量",
+        LimitConfigurationError,
+    )
+    if not 0 < delta <= 8.0:
+        raise LimitConfigurationError(
+            "底座诊断变化必须大于 0 且不超过 8 度。"
+        )
+    if margin < 0:
+        raise LimitConfigurationError("底座边界余量不能为负数。")
+
+    limits = SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS
+    positive_headroom = limits.maximum - margin - current
+    negative_headroom = current - (limits.minimum + margin)
+    if positive_headroom >= delta and positive_headroom >= negative_headroom:
+        return current + delta
+    if negative_headroom >= delta:
+        return current - delta
+    if positive_headroom >= delta:
+        return current + delta
+    raise LimitViolationError(
+        "当前底座位置没有足够空间完成带边界余量的诊断动作。"
+    )
+
+
+def build_so100_plus_right_follower_local_joint_limits(
+    current_joint_radians: Sequence[float],
+    *,
+    max_delta_radians: float = 0.1,
+    max_step_radians: float | None = None,
+) -> JointLimits:
+    """为一次局部验证创建相对当前位置的小范围关节限制。
+
+    只有底座关节额外使用了真机实测绝对范围；其余关节只允许围绕当前
+    校准位置小幅变化，不能把返回值当作完整的实机绝对关节范围。
+    """
+
+    current = _finite_vector(
+        current_joint_radians,
+        expected_length=len(SO100_PLUS_ARM_JOINT_NAMES),
+        label="当前关节位置",
+        error_type=LimitViolationError,
+    )
+    max_delta = _finite_number(
+        max_delta_radians,
+        "局部关节最大变化",
+        LimitConfigurationError,
+    )
+    if not 0 < max_delta <= 0.1:
+        raise LimitConfigurationError(
+            "局部关节最大变化必须大于 0 且不超过 0.1 rad。"
+        )
+    step = (
+        max_delta
+        if max_step_radians is None
+        else _finite_number(
+            max_step_radians,
+            "局部关节单步变化",
+            LimitConfigurationError,
+        )
+    )
+    if not 0 < step <= max_delta:
+        raise LimitConfigurationError(
+            "局部关节单步变化必须大于 0 且不超过局部最大变化。"
+        )
+
+    current_base_driver_degrees = -math.degrees(current[0])
+    SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.validate(
+        current_base_driver_degrees,
+        "当前底座关节",
+    )
+    measured_base_lower_radians = math.radians(
+        -SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.maximum
+    )
+    measured_base_upper_radians = math.radians(
+        -SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.minimum
+    )
+
+    lower = [value - max_delta for value in current]
+    upper = [value + max_delta for value in current]
+    lower[0] = max(lower[0], measured_base_lower_radians)
+    upper[0] = min(upper[0], measured_base_upper_radians)
+    limits = JointLimits(
+        joint_names=SO100_PLUS_ARM_JOINT_NAMES,
+        lower_radians=tuple(lower),
+        upper_radians=tuple(upper),
+        max_step_radians=(step,) * len(SO100_PLUS_ARM_JOINT_NAMES),
+    )
+    limits.validate_position(current)
+    return limits
+
+
+def build_so100_plus_right_follower_execution_joint_limits(
+    current_joint_radians: Sequence[float],
+    *,
+    max_step_radians: float,
+) -> JointLimits:
+    """创建不限制整段总变化、但保留绝对边界和单步限制的执行范围。
+
+    底座继续使用真机实测范围。其余关节使用第三方模型范围；如果当前
+    校准角略在模型范围外，只把当前位置扩展为边界，并仅允许向模型
+    范围内移动，不能继续向外扩大。
+    """
+
+    current = _finite_vector(
+        current_joint_radians,
+        expected_length=len(SO100_PLUS_ARM_JOINT_NAMES),
+        label="当前关节位置",
+        error_type=LimitViolationError,
+    )
+    step = _finite_number(
+        max_step_radians,
+        "关节单步变化",
+        LimitConfigurationError,
+    )
+    if not 0 < step <= 0.1:
+        raise LimitConfigurationError(
+            "关节单步变化必须大于 0 且不超过 0.1 rad。"
+        )
+
+    current_base_driver_degrees = -math.degrees(current[0])
+    SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.validate(
+        current_base_driver_degrees,
+        "当前底座关节",
+    )
+    measured_base_lower_radians = math.radians(
+        -SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.maximum
+    )
+    measured_base_upper_radians = math.radians(
+        -SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.minimum
+    )
+
+    lower = [
+        min(model_lower, current_value)
+        for model_lower, current_value in zip(
+            SO100_PLUS_MODEL_JOINT_LIMITS.lower_radians,
+            current,
+            strict=True,
+        )
+    ]
+    upper = [
+        max(model_upper, current_value)
+        for model_upper, current_value in zip(
+            SO100_PLUS_MODEL_JOINT_LIMITS.upper_radians,
+            current,
+            strict=True,
+        )
+    ]
+    lower[0] = measured_base_lower_radians
+    upper[0] = measured_base_upper_radians
+    limits = JointLimits(
+        joint_names=SO100_PLUS_ARM_JOINT_NAMES,
+        lower_radians=tuple(lower),
+        upper_radians=tuple(upper),
+        max_step_radians=(step,) * len(SO100_PLUS_ARM_JOINT_NAMES),
+    )
+    limits.validate_position(current)
+    return limits

@@ -7,6 +7,8 @@ import pytest
 from rosclaw_mini.arm.kinematics import (
     InverseKinematicsError,
     SO100PlusKinematics,
+    SO100_PLUS_GRIPPER_TCP_OFFSET_M,
+    SO100_PLUS_JOYCON_REST_RADIANS,
 )
 from rosclaw_mini.safety.limits import (
     AxisLimits,
@@ -15,6 +17,17 @@ from rosclaw_mini.safety.limits import (
     MotionLimits,
     WorkspaceLimits,
 )
+
+
+def test_joycon_plus_rest_pose_matches_controller_source():
+    assert SO100_PLUS_JOYCON_REST_RADIANS == (
+        0.0,
+        -3.1,
+        3.0,
+        0.0,
+        0.0,
+        1.57,
+    )
 
 
 class FakeTransform:
@@ -32,12 +45,16 @@ class FakeSolution:
 class FakeKinematicsRobot:
     """只模拟数学接口，不包含串口或电机。"""
 
-    def __init__(self):
+    def __init__(self, rotation=None):
         self.solve_calls = []
         self.fail = False
+        self.rotation = (
+            np.eye(3) if rotation is None else np.asarray(rotation, dtype=float)
+        )
 
     def fkine(self, q):
         matrix = np.eye(4)
+        matrix[:3, :3] = self.rotation
         matrix[:3, 3] = np.asarray(q[:3], dtype=float)
         return FakeTransform(matrix)
 
@@ -91,12 +108,39 @@ def test_driver_and_model_joint_conversions_round_trip():
     )
 
 
+def test_forward_position_applies_tcp_offset_along_tool_local_x_axis():
+    quarter_turn_about_z = np.asarray(
+        (
+            (0.0, -1.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+    )
+    kinematics = SO100PlusKinematics(
+        robot=FakeKinematicsRobot(rotation=quarter_turn_about_z)
+    )
+
+    tcp_position = kinematics.forward_position(
+        (0.2, -0.1, 0.3, 0.0, 0.0, 0.0)
+    )
+
+    assert SO100_PLUS_GRIPPER_TCP_OFFSET_M == (
+        0.10127,
+        -0.00690,
+        0.00118,
+    )
+    assert tcp_position == pytest.approx((0.20690, 0.00127, 0.30118))
+
+
 def test_same_position_returns_current_joints_without_calling_solver():
     robot = FakeKinematicsRobot()
     kinematics = SO100PlusKinematics(robot=robot)
     current = (0.2, -0.1, 0.3, 0.0, 0.0, 0.0)
 
-    solved = kinematics.solve_position(current, (0.2, -0.1, 0.3))
+    solved = kinematics.solve_position(
+        current,
+        kinematics.forward_position(current),
+    )
 
     assert solved == pytest.approx(current)
     assert robot.solve_calls == []
@@ -109,7 +153,15 @@ def test_solver_disables_broken_backend_limits_and_unwraps_near_current():
 
     solved = kinematics.solve_position(current, (0.2, -0.1, 0.3))
 
-    assert solved == pytest.approx((0.2, -0.1, 0.3, 0.0, 0.0, 0.0))
+    assert solved == pytest.approx(
+        (0.09873, -0.09310, 0.29882, 0.0, 0.0, 0.0)
+    )
+    assert kinematics.forward_position(solved) == pytest.approx(
+        (0.2, -0.1, 0.3)
+    )
+    assert robot.solve_calls[0][0][:3, 3] == pytest.approx(
+        (0.09873, -0.09310, 0.29882)
+    )
     assert robot.solve_calls[0][2]["joint_limits"] is False
     assert robot.solve_calls[0][2]["seed"] == 0
 
@@ -133,9 +185,9 @@ def test_plan_position_validates_limits_and_splits_joint_path():
         limits=limits,
     )
 
-    assert len(plan.waypoints_radians) == 3
+    assert len(plan.waypoints_radians) == 2
     assert plan.target_joint_radians == pytest.approx(
-        (0.25, 0.0, 0.0, 0.0, 0.0, 0.0)
+        (0.14873, 0.00690, -0.00118, 0.0, 0.0, 0.0)
     )
     previous = (0.0,) * 6
     for waypoint in plan.waypoints_radians:
