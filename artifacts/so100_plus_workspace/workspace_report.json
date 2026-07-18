@@ -1,0 +1,223 @@
+{
+  "classification": "simulation_candidate_workspace_not_real_hardware_certification",
+  "generated_at_utc": "2026-07-18T02:03:11.423637+00:00",
+  "model": {
+    "path": "lerobot-joycon_plus/lerobot/common/robot_devices/controllers/scene_plus.xml",
+    "sha256": "0837b3b3f550a4cb6bac6eb089e34077e83724d3e66a09533b8379b2cd46ca6a",
+    "support_plane_enabled": true,
+    "support_plane_z_m": 0.0,
+    "support_plane_represents_tabletop": true,
+    "separate_table_mesh_enabled": false,
+    "extra_physical_base_geometry_included": false,
+    "extra_base_obstacle_required_by_user": false
+  },
+  "sampling": {
+    "method": "uniform_random_joint_space",
+    "seed": 20260718,
+    "requested_samples": 1000000,
+    "processed_samples": 1000000,
+    "chunk_size": 32768,
+    "gripper_model_radians": 0.0
+  },
+  "joint_ranges": [
+    {
+      "name": "shoulder_rotation_joint",
+      "source": "measured right_follower driver limits converted to model",
+      "model_radians": {
+        "minimum": -0.5445631818810642,
+        "maximum": 0.3420777091535133
+      },
+      "model_degrees": {
+        "minimum": -31.201172000000003,
+        "maximum": 19.599609
+      }
+    },
+    {
+      "name": "shoulder_pitch_joint",
+      "source": "MuJoCo joint range",
+      "model_radians": {
+        "minimum": -3.14158,
+        "maximum": 0.2
+      },
+      "model_degrees": {
+        "minimum": -179.99927500270914,
+        "maximum": 11.459155902616466
+      }
+    },
+    {
+      "name": "ellbow_joint",
+      "source": "MuJoCo joint range",
+      "model_radians": {
+        "minimum": 0.0,
+        "maximum": 3.14158
+      },
+      "model_degrees": {
+        "minimum": 0.0,
+        "maximum": 179.99927500270914
+      }
+    },
+    {
+      "name": "wrist_pitch_joint",
+      "source": "MuJoCo joint range",
+      "model_radians": {
+        "minimum": -2.0,
+        "maximum": 1.8
+      },
+      "model_degrees": {
+        "minimum": -114.59155902616465,
+        "maximum": 103.13240312354819
+      }
+    },
+    {
+      "name": "wrist_jaw_joint",
+      "source": "MuJoCo joint range",
+      "model_radians": {
+        "minimum": -1.45,
+        "maximum": 1.45
+      },
+      "model_degrees": {
+        "minimum": -83.07888029396936,
+        "maximum": 83.07888029396936
+      }
+    },
+    {
+      "name": "wrist_roll_joint",
+      "source": "MuJoCo joint range",
+      "model_radians": {
+        "minimum": -3.14158,
+        "maximum": 3.14158
+      },
+      "model_degrees": {
+        "minimum": -179.99927500270914,
+        "maximum": 179.99927500270914
+      }
+    }
+  ],
+  "base_driver_degrees": {
+    "minimum": -19.599609,
+    "maximum": 31.201172
+  },
+  "filtering": {
+    "collision_free_samples": 527612,
+    "rejected_samples": 472388,
+    "collision_free_ratio": 0.527612,
+    "mujoco_collision_samples": 471905,
+    "tcp_below_floor_samples": 234936,
+    "floor_contact_samples": 291039,
+    "self_contact_samples": 299542,
+    "top_contact_pair_events": {
+      "world ↔ wrist_roll": 635431,
+      "gripper ↔ world": 620468,
+      "world ↔ wrist_jaw": 533083,
+      "world ↔ wrist_pitch": 380485,
+      "ellbow ↔ world": 235892,
+      "ellbow ↔ wrist_jaw": 228992,
+      "shoulder_rotation ↔ wrist_pitch": 125695,
+      "ellbow ↔ shoulder_rotation": 119154,
+      "shoulder_rotation ↔ wrist_jaw": 101562,
+      "base ↔ wrist_jaw": 77043,
+      "base ↔ wrist_pitch": 61795,
+      "base ↔ wrist_roll": 54076,
+      "shoulder_rotation ↔ wrist_roll": 34430,
+      "base ↔ gripper": 30216,
+      "base ↔ ellbow": 26396,
+      "shoulder_pitch ↔ wrist_jaw": 24820,
+      "shoulder_pitch ↔ wrist_pitch": 22813,
+      "gripper ↔ shoulder_rotation": 17410,
+      "shoulder_pitch ↔ wrist_roll": 11707,
+      "gripper ↔ shoulder_pitch": 3833
+    }
+  },
+  "tcp_workspace": {
+    "coordinate_frame": "SO100 Plus kinematics base frame",
+    "unit": "meter",
+    "tcp_offset_m": [
+      0.10127,
+      -0.0069,
+      0.00118
+    ],
+    "rest_tcp_m": [
+      0.3035714232672181,
+      -0.0011854942801636243,
+      0.17932848288990053
+    ],
+    "geometric_sample_aabb_m": {
+      "x": {
+        "minimum": -0.3428551682236073,
+        "maximum": 0.5301234604753592,
+        "span": 0.8729786286989665
+      },
+      "y": {
+        "minimum": -0.31163818724903275,
+        "maximum": 0.27683095179767747,
+        "span": 0.5884691390467103
+      },
+      "z": {
+        "minimum": -0.25783051370485266,
+        "maximum": 0.5538459363353089,
+        "span": 0.8116764500401615
+      }
+    },
+    "collision_free_sample_aabb_m": {
+      "x": {
+        "minimum": -0.3428551682236073,
+        "maximum": 0.5301234604753592,
+        "span": 0.8729786286989665
+      },
+      "y": {
+        "minimum": -0.31163818724903275,
+        "maximum": 0.27683095179767747,
+        "span": 0.5884691390467103
+      },
+      "z": {
+        "minimum": 6.16552342078136e-06,
+        "maximum": 0.5538459363353089,
+        "span": 0.5538397708118881
+      }
+    },
+    "collision_free_central_99_percent_m": {
+      "x": {
+        "minimum": -0.2847477133302877,
+        "maximum": 0.5014861492783047,
+        "span": 0.7862338626085924
+      },
+      "y": {
+        "minimum": -0.2642544430086586,
+        "maximum": 0.22110217640943786,
+        "span": 0.48535661941809644
+      },
+      "z": {
+        "minimum": 0.009478025534528955,
+        "maximum": 0.5337907243939142,
+        "span": 0.5243126988593853
+      }
+    },
+    "warning": "AABB corners and interior are not guaranteed reachable; the point union is orientation-dependent."
+  },
+  "voxelization": {
+    "voxel_size_m": 0.01,
+    "origin_m": [
+      -0.35000000000000003,
+      -0.32,
+      0.0
+    ],
+    "occupied_voxel_count": 102807,
+    "approximate_occupied_volume_m3": 0.10280700000000002
+  },
+  "artifacts": {
+    "points": "artifacts/so100_plus_workspace/collision_free_tcp_points.npz",
+    "plot": "artifacts/so100_plus_workspace/workspace_views.png",
+    "report": "artifacts/so100_plus_workspace/workspace_report.json"
+  },
+  "limitations": [
+    "The tabletop is idealized as an infinite z=0 support plane.",
+    "Table edges and thickness are intentionally outside the user-defined scope.",
+    "The extra mount is represented only by the measured base rotation range.",
+    "Only the measured base rotation range is a real-hardware limit.",
+    "Other joint ranges come from MuJoCo, not physical certification.",
+    "Cable routing, backlash, gravity sag, payload, and thermal effects are absent.",
+    "The workspace is the union over sampled TCP orientations.",
+    "Random sampling approximates boundaries and cannot prove completeness.",
+    "The axis-aligned bounding box is not a safe WorkspaceLimits box."
+  ]
+}

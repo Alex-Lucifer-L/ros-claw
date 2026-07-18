@@ -9,9 +9,11 @@ from rosclaw_mini.safety.limits import (
     LimitViolationError,
     MotionLimits,
     SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS,
+    SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
     WorkspaceLimits,
     build_so100_plus_right_follower_execution_joint_limits,
     build_so100_plus_right_follower_local_joint_limits,
+    build_so100_plus_right_follower_motion_limits,
     choose_so100_plus_right_follower_base_test_target,
 )
 
@@ -55,6 +57,48 @@ def test_workspace_rejects_non_finite_and_out_of_range_coordinates():
 
     with pytest.raises(LimitViolationError, match="y"):
         workspace.validate_position(0.2, 0.31, 0.2)
+
+
+def test_formal_right_follower_workspace_accepts_closed_boundaries():
+    workspace = SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
+
+    assert workspace.validate_position(
+        workspace.x.minimum,
+        workspace.y.minimum,
+        workspace.z.minimum,
+    ) == pytest.approx(
+        (
+            0.3135714232672181,
+            -0.041185494280163625,
+            0.17932848288990053,
+        )
+    )
+    assert workspace.validate_position(
+        workspace.x.maximum,
+        workspace.y.maximum,
+        workspace.z.maximum,
+    ) == pytest.approx(
+        (
+            0.4335714232672181,
+            0.018814505719836373,
+            0.29932848288990055,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("position", "axis"),
+    [
+        ((0.3135714232672181 - 1e-9, 0.0, 0.2), "x"),
+        ((0.35, 0.018814505719836373 + 1e-9, 0.2), "y"),
+        ((0.35, 0.0, 0.29932848288990055 + 1e-9), "z"),
+    ],
+)
+def test_formal_right_follower_workspace_rejects_outside(position, axis):
+    with pytest.raises(LimitViolationError, match=axis):
+        SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS.validate_position(
+            *position
+        )
 
 
 def test_joint_limits_validate_position_and_step():
@@ -181,6 +225,17 @@ def test_execution_limits_only_extend_out_of_model_current_toward_model():
         limits.validate_position(
             (0.0, math.radians(-192.0), 3.0, 0.0, 0.0, 1.57)
         )
+
+
+def test_formal_right_follower_motion_limits_reuse_registered_workspace():
+    current = (0.0, math.radians(-191.0), 3.0, 0.0, 0.0, 1.57)
+
+    limits = build_so100_plus_right_follower_motion_limits(current)
+
+    assert limits.workspace is SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
+    assert limits.joints.max_step_radians == pytest.approx(
+        (math.radians(2.0),) * 6
+    )
 
 
 def test_base_test_target_chooses_side_with_more_headroom():

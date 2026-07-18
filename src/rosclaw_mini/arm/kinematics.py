@@ -19,7 +19,11 @@ from rosclaw_mini.safety.limits import (
 
 
 SO100_PLUS_DRIVER_TO_MODEL_SIGNS = (-1, -1, 1, -1, 1, 1)
-SO100_PLUS_JOYCON_REST_RADIANS = (0.0, -3.1, 3.0, 0.0, 0.0, 1.57)
+# JoyConController_plus.init_qpos 中的“控制器初始工作姿态”。它不是
+# README 校准流程照片里的 follower_rest 收纳姿态。
+SO100_PLUS_JOYCON_INITIAL_RADIANS = (0.0, -3.1, 3.0, 0.0, 0.0, 1.57)
+# 保留旧名称，避免外部调用立即失效；新代码应使用 INITIAL 名称。
+SO100_PLUS_JOYCON_REST_RADIANS = SO100_PLUS_JOYCON_INITIAL_RADIANS
 # X 来自 lerobot_kinematics 源码中预留但未启用的 E18=tx(0.10127)。
 # Y/Z 来自 MuJoCo 两根夹指最前端内侧接触面的共同高度中心和间隙中点。
 # 三者共同描述第六关节运动学末端到固定夹持中心的工具局部坐标。
@@ -285,6 +289,34 @@ class SO100PlusKinematics:
             target_position_m=target_position,
             current_joint_radians=current,
             target_joint_radians=target_joints,
+            waypoints_radians=waypoints,
+        )
+
+    def plan_joint_pose(
+        self,
+        current_joint_radians: Sequence[float],
+        target_joint_radians: Sequence[float],
+        limits: MotionLimits,
+    ) -> JointMotionPlan:
+        """规划到显式模型关节姿态，并复用同一套关节与 TCP 边界。"""
+
+        current = limits.joints.validate_position(current_joint_radians)
+        target = limits.joints.validate_position(target_joint_radians)
+        target_position = self.forward_position(target)
+        limits.validate_target_position(target_position)
+        waypoints = self._interpolate_joint_path(
+            current,
+            target,
+            limits.joints,
+        )
+        for waypoint in waypoints:
+            limits.validate_target_position(
+                self.forward_position(waypoint)
+            )
+        return JointMotionPlan(
+            target_position_m=target_position,
+            current_joint_radians=current,
+            target_joint_radians=target,
             waypoints_radians=waypoints,
         )
 

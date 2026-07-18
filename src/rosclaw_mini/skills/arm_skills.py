@@ -3,7 +3,11 @@
 from rosclaw_mini.skills.base import ParamSpec, SkillDefinition
 from rosclaw_mini.skills.arm_handler import ArmHandlers
 from rosclaw_mini.arm.base import ArmAdapter
-from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
+from rosclaw_mini.safety.limits import (
+    AxisLimits,
+    SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+    WorkspaceLimits,
+)
 
 
 def _position_param_spec(axis: AxisLimits | None) -> ParamSpec:
@@ -91,3 +95,14 @@ def build_arm_skills(
         "stop": stop_skill,
         "disable_torque": disable_torque_skill,
     }
+
+
+def build_so100_plus_right_follower_arm_skills(
+    adapter: ArmAdapter,
+) -> dict[str, SkillDefinition]:
+    """用已登记的 right_follower 工作空间构建真机 Skill。"""
+
+    return build_arm_skills(
+        adapter,
+        workspace_limits=SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+    )

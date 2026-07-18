@@ -88,6 +88,6 @@ class ArmAdapter(ABC):
         pass
 
     @abstractmethod
-    def disable_torque(self) -> None:
-        """关闭全部关节力矩，使机械臂变为可手动移动状态。"""
+    def disable_torque(self, *, emergency: bool = False) -> None:
+        """关闭全部关节力矩；真实适配器可区分正常与紧急释放。"""
         pass

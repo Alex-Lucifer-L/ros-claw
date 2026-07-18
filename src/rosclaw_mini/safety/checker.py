@@ -1,5 +1,8 @@
-import math
-from numbers import Real
+"""
+此模块提供了用于检查命令安全性的功能。它确保命令结构正确，参数值为有限数值，并且符合技能定义中指定的边界条件。
+"""
+import math#这里导入的是 math 模块，它提供了对数学函数的访问，例如检查数值是否为有限数值。
+from numbers import Real#这里导入的是 Real 类，它是 Python 中所有实数类型的基类，包括 int 和 float。作用是为了在后续的代码中检查参数值是否为有限的实数类型。
 
 from rosclaw_mini.command_schema.commands import Command, SafetyResult
 from rosclaw_mini.skills.base import SkillDefinition

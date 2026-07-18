@@ -12,7 +12,7 @@ import mujoco.viewer
 import numpy as np
 
 from rosclaw_mini.arm.kinematics import (
-    SO100_PLUS_JOYCON_REST_RADIANS,
+    SO100_PLUS_JOYCON_INITIAL_RADIANS,
     SO100PlusKinematics,
 )
 
@@ -110,7 +110,7 @@ def main() -> int:
     model_path = args.model.resolve()
     model = mujoco.MjModel.from_xml_path(str(model_path))
     data = mujoco.MjData(model)
-    rest_qpos = np.asarray(SO100_PLUS_JOYCON_REST_RADIANS, dtype=float)
+    rest_qpos = np.asarray(SO100_PLUS_JOYCON_INITIAL_RADIANS, dtype=float)
     kinematics = SO100PlusKinematics()
     start_position = kinematics.forward_position(rest_qpos)
     target_position = (
@@ -124,7 +124,7 @@ def main() -> int:
     )
 
     print(f"模型：{model_path}", flush=True)
-    print(f"JoyCon rest 夹爪 TCP XYZ(m)：{start_position}", flush=True)
+    print(f"JoyCon 初始工作姿态 TCP XYZ(m)：{start_position}", flush=True)
     print(f"夹爪 TCP 目标 XYZ(m)：{target_position}", flush=True)
     print("红球 = move_to() 使用绝对 XYZ 控制的夹爪 TCP。", flush=True)
     print("它位于两根夹指尖端之间的夹持中心。", flush=True)

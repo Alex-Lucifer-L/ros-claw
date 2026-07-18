@@ -1,8 +1,9 @@
 """机械臂运动限制的数据结构和纯计算检查。
 
-本模块不读取机械臂、不写电机，也不把示例工作空间当成实机安全范围。
-真实运动必须由调用方显式提供经过确认的 ``WorkspaceLimits`` 和
-``JointLimits``。
+本模块不读取机械臂、不写电机。真实运动必须由调用方显式提供经过确认的
+``WorkspaceLimits`` 和 ``JointLimits``；带具体机械臂名称的常量只适用于
+注释中写明的实机、校准、底座和 TCP 姿态条件。
+通俗来说，这个模块是用来检查机械臂运动命令是否在安全空间运行范围内的工具，而不是直接控制机械臂的代码。
 """
 
 from collections.abc import Sequence
@@ -24,6 +25,9 @@ def _finite_number(
     label: str,
     error_type: type[ValueError],
 ) -> float:
+    """
+    检查数值是否为有限数值，并返回浮点数表示。
+    """
     if (
         isinstance(value, bool)
         or not isinstance(value, Real)
@@ -40,6 +44,9 @@ def _finite_vector(
     label: str,
     error_type: type[ValueError],
 ) -> tuple[float, ...]:
+    """
+    检查向量是否为有限数值，并返回浮点数元组表示。
+    """
     if isinstance(values, (str, bytes)):
         raise error_type(f"{label} 需要 {expected_length} 个关节值。")
 
@@ -61,7 +68,10 @@ def _finite_vector(
 
 @dataclass(frozen=True)
 class AxisLimits:
-    """一个笛卡尔坐标轴的闭区间，单位由调用场景决定。"""
+    """
+    一个笛卡尔坐标轴的闭区间，单位由调用场景决定。
+    通俗解释：这个类表示机械臂在某个轴上的运动范围，包含最小值和最大值。如果设置的最小值大于最大值，会抛出配置错误异常。
+    """
 
     minimum: float
     maximum: float
@@ -269,6 +279,29 @@ SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS = AxisLimits(
     maximum=31.201172,
 )
 
+# 2026-07-18 将 right_follower 的 JoyCon 初始 TCP 姿态候选框内缩
+# 一个 1 cm 仿真网格后，14 个边界代表点均完成真机运动测试。
+# 12 点满足 12 mm 到位门槛；X 最大面中心和 X/Y/Z 最大角分别有
+# 约 24.8 mm、14.78 mm 到位误差，但路径、负载和温度均无异常。
+# 用户确认把这个内缩长方体作为正式“可达工作空间”使用。
+#
+# 这组范围不承诺全域 12 mm 定位精度，也不代表任意 TCP 姿态、其他
+# follower、其他校准文件、其他底座或存在障碍物的工位仍然有效。
+SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS = WorkspaceLimits(
+    x=AxisLimits(
+        minimum=0.3135714232672181,
+        maximum=0.4335714232672181,
+    ),
+    y=AxisLimits(
+        minimum=-0.041185494280163625,
+        maximum=0.018814505719836373,
+    ),
+    z=AxisLimits(
+        minimum=0.17932848288990053,
+        maximum=0.29932848288990055,
+    ),
+)
+
 
 def choose_so100_plus_right_follower_base_test_target(
     current_driver_degrees: float,
@@ -446,3 +479,23 @@ def build_so100_plus_right_follower_execution_joint_limits(
     )
     limits.validate_position(current)
     return limits
+
+
+def build_so100_plus_right_follower_motion_limits(
+    current_joint_radians: Sequence[float],
+    *,
+    max_step_radians: float = math.radians(2.0),
+) -> MotionLimits:
+    """构造正式工作空间与 right_follower 执行关节范围的组合限制。
+
+    当前关节位置仍是必需输入，因为收纳姿态可能略超第三方模型边界；
+    执行关节范围只会为当次当前位置向模型内部提供过渡，不会继续向外扩张。
+    """
+
+    return MotionLimits(
+        workspace=SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+        joints=build_so100_plus_right_follower_execution_joint_limits(
+            current_joint_radians,
+            max_step_radians=max_step_radians,
+        ),
+    )

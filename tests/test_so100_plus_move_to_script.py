@@ -24,7 +24,7 @@ def test_real_move_script_defaults_to_saved_hardware_profile():
     )
 
     assert args.runtime_acceleration == 35
-    assert args.stream_frequency_hz == 20.0
+    assert args.stream_frequency_hz == 30.0
     assert args.stream_max_joint_speed_degrees_per_second == 20.0
 
 

@@ -65,6 +65,6 @@ class MockArmAdapter(ArmAdapter):
         # 模拟停止机械臂。
         self.is_stopped = True
 
-    def disable_torque(self) -> None:
+    def disable_torque(self, *, emergency: bool = False) -> None:
         # 模拟关闭全部关节力矩。
         self.torque_enabled = False

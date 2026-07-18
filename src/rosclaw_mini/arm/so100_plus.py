@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import math
 from threading import Event, Lock
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from rosclaw_mini.arm.base import ArmAdapter
 from rosclaw_mini.arm.kinematics import (
@@ -17,7 +17,14 @@ from rosclaw_mini.safety.limits import (
 
 
 GRIPPER_MOTOR_NAME = "gripper_joint"
+SHOULDER_ROTATION_MOTOR_NAME = "shoulder_rotation_joint"
 ELBOW_MOTOR_NAME = "ellbow_joint"
+WRIST_PITCH_MOTOR_NAME = "wrist_pitch_joint"
+TUNED_PID_MOTOR_NAMES = (
+    SHOULDER_ROTATION_MOTOR_NAME,
+    ELBOW_MOTOR_NAME,
+    WRIST_PITCH_MOTOR_NAME,
+)
 
 
 class SO100PlusGripperSafetyError(RuntimeError):
@@ -40,23 +47,56 @@ class SO100PlusArmSafetyError(RuntimeError):
     """手臂轨迹执行途中超出已确认的安全条件。"""
 
 
+class SO100PlusMotionConvergenceError(SO100PlusArmSafetyError):
+    """轨迹安全完成，但最终位置或稳定时间没有达到验收门槛。"""
+
+
+class SO100PlusTorqueReleaseSafetyError(RuntimeError):
+    """普通力矩释放不满足 follower_rest 前置条件。"""
+
+
 @dataclass(frozen=True)
 class SO100PlusRealHardwareProfile:
     """上一次 right_follower 真机验证后保存的运行配置。"""
 
     other_motor_p_coefficient: int = 16
     elbow_p_coefficient: int = 64
+    wrist_pitch_p_coefficient: int = 24
+    tuned_motor_i_coefficient: int = 2
+    tuned_motor_d_coefficient: int = 32
+    storage_rest_driver_degrees: tuple[float, ...] = (
+        2.900,
+        193.096,
+        178.418,
+        71.719,
+        -1.318,
+        101.162,
+    )
+    storage_rest_tolerances_degrees: tuple[float, ...] = (
+        5.0,
+        8.0,
+        5.0,
+        5.0,
+        20.0,
+        15.0,
+    )
     runtime_acceleration: int = 35
     gripper_max_step_degrees: float = 10.0
     gripper_settle_seconds: float = 2.5
+    gripper_load_limit: float = 300.0
     gripper_position_tolerance_degrees: float = 3.0
     waypoint_timeout_seconds: float = 8.0
     waypoint_poll_interval_seconds: float = 0.25
-    joint_position_tolerance_degrees: float = 1.5
-    cartesian_tolerance_m: float = 0.006
-    load_limit: float = 300.0
+    final_settle_seconds: float = 0.75
+    joint_position_tolerance_degrees: float = 3.0
+    cartesian_tolerance_m: float = 0.012
+    load_limit: float = 450.0
+    critical_load_limit: float = 700.0
+    load_confirmation_samples: int = 2
     max_temperature_celsius: float = 60.0
-    stream_frequency_hz: float = 20.0
+    critical_temperature_celsius: float = 70.0
+    temperature_confirmation_samples: int = 2
+    stream_frequency_hz: float = 30.0
     stream_max_joint_speed_degrees_per_second: float = 20.0
     stream_tracking_error_limit_degrees: float = 5.0
     stream_telemetry_interval_seconds: float = 0.25
@@ -66,8 +106,8 @@ SO100_PLUS_REAL_HARDWARE_PROFILE = SO100PlusRealHardwareProfile()
 DEFAULT_ELBOW_P_COEFFICIENT = (
     SO100_PLUS_REAL_HARDWARE_PROFILE.elbow_p_coefficient
 )
-RESTORED_ELBOW_P_COEFFICIENT = (
-    SO100_PLUS_REAL_HARDWARE_PROFILE.other_motor_p_coefficient
+DEFAULT_WRIST_PITCH_P_COEFFICIENT = (
+    SO100_PLUS_REAL_HARDWARE_PROFILE.wrist_pitch_p_coefficient
 )
 
 
@@ -84,6 +124,38 @@ class SO100PlusTelemetry:
 
 
 @dataclass(frozen=True)
+class SO100PlusSettleReport:
+    """最终关节进入容差后连续稳定观察得到的位置统计。"""
+
+    motor_names: tuple[str, ...]
+    position_samples_degrees: tuple[tuple[float, ...], ...]
+    position_span_degrees: tuple[float, ...]
+    tcp_samples_m: tuple[tuple[float, float, float], ...]
+    tcp_min_m: tuple[float, float, float]
+    tcp_max_m: tuple[float, float, float]
+    tcp_mean_m: tuple[float, float, float]
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
+class SO100PlusPIDGains:
+    """一个 STS3215 位置环的 EPROM PID 参数。"""
+
+    p: int
+    i: int
+    d: int
+
+    def __post_init__(self) -> None:
+        for name, value in (("P", self.p), ("I", self.i), ("D", self.d)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 254
+            ):
+                raise ValueError(f"{name} 增益必须是 0 到 254 之间的整数。")
+
+
+@dataclass(frozen=True)
 class SO100PlusGripperConfig:
     """真实夹爪已经验证过的运行参数。"""
 
@@ -96,7 +168,7 @@ class SO100PlusGripperConfig:
     settle_seconds: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.gripper_settle_seconds
     )
-    load_limit: float = SO100_PLUS_REAL_HARDWARE_PROFILE.load_limit
+    load_limit: float = SO100_PLUS_REAL_HARDWARE_PROFILE.gripper_load_limit
     position_tolerance_degrees: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.gripper_position_tolerance_degrees
     )
@@ -145,6 +217,9 @@ class SO100PlusMotionConfig:
     waypoint_poll_interval_seconds: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.waypoint_poll_interval_seconds
     )
+    final_settle_seconds: float = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.final_settle_seconds
+    )
     joint_position_tolerance_degrees: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.joint_position_tolerance_degrees
     )
@@ -152,8 +227,20 @@ class SO100PlusMotionConfig:
         SO100_PLUS_REAL_HARDWARE_PROFILE.cartesian_tolerance_m
     )
     load_limit: float = SO100_PLUS_REAL_HARDWARE_PROFILE.load_limit
+    critical_load_limit: float = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.critical_load_limit
+    )
+    load_confirmation_samples: int = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.load_confirmation_samples
+    )
     max_temperature_celsius: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.max_temperature_celsius
+    )
+    critical_temperature_celsius: float = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.critical_temperature_celsius
+    )
+    temperature_confirmation_samples: int = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.temperature_confirmation_samples
     )
     stream_frequency_hz: float | None = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.stream_frequency_hz
@@ -172,10 +259,13 @@ class SO100PlusMotionConfig:
         values = (
             self.waypoint_timeout_seconds,
             self.waypoint_poll_interval_seconds,
+            self.final_settle_seconds,
             self.joint_position_tolerance_degrees,
             self.cartesian_tolerance_m,
             self.load_limit,
+            self.critical_load_limit,
             self.max_temperature_celsius,
+            self.critical_temperature_celsius,
             self.stream_max_joint_speed_degrees_per_second,
             self.stream_tracking_error_limit_degrees,
             self.stream_telemetry_interval_seconds,
@@ -191,14 +281,37 @@ class SO100PlusMotionConfig:
             > self.waypoint_timeout_seconds
         ):
             raise ValueError("轨迹点轮询间隔不能大于到位超时时间。")
+        if self.final_settle_seconds < 0:
+            raise ValueError("最终稳定观察时间不能为负数。")
+        if self.final_settle_seconds > self.waypoint_timeout_seconds:
+            raise ValueError("最终稳定观察时间不能大于到位超时时间。")
         if self.joint_position_tolerance_degrees < 0:
             raise ValueError("关节位置容差不能为负数。")
         if self.cartesian_tolerance_m <= 0:
             raise ValueError("夹爪 TCP 位置容差必须大于 0。")
         if self.load_limit <= 0:
             raise ValueError("手臂负载限制必须大于 0。")
+        if self.critical_load_limit <= self.load_limit:
+            raise ValueError("手臂紧急负载上限必须大于普通负载上限。")
+        if (
+            isinstance(self.load_confirmation_samples, bool)
+            or not isinstance(self.load_confirmation_samples, int)
+            or not 2 <= self.load_confirmation_samples <= 5
+        ):
+            raise ValueError("普通负载连续确认次数必须是 2 到 5。")
         if self.max_temperature_celsius <= 0:
             raise ValueError("电机温度上限必须大于 0°C。")
+        if (
+            self.critical_temperature_celsius
+            <= self.max_temperature_celsius
+        ):
+            raise ValueError("电机紧急温度上限必须大于普通温度上限。")
+        if (
+            isinstance(self.temperature_confirmation_samples, bool)
+            or not isinstance(self.temperature_confirmation_samples, int)
+            or not 2 <= self.temperature_confirmation_samples <= 5
+        ):
+            raise ValueError("普通过温连续确认次数必须是 2 到 5。")
         if self.stream_frequency_hz is not None:
             if (
                 isinstance(self.stream_frequency_hz, bool)
@@ -231,6 +344,7 @@ class SO100PlusAdapter(ArmAdapter):
         motion_limits: MotionLimits | None = None,
         motion_config: SO100PlusMotionConfig | None = None,
         elbow_p_coefficient: int = DEFAULT_ELBOW_P_COEFFICIENT,
+        wrist_pitch_p_coefficient: int = DEFAULT_WRIST_PITCH_P_COEFFICIENT,
         cameras: Mapping[str, object] | None = None,
     ):
         if (kinematics is None) != (motion_limits is None):
@@ -243,12 +357,17 @@ class SO100PlusAdapter(ArmAdapter):
             or not 32 <= elbow_p_coefficient <= 64
         ):
             raise ValueError("肘关节 P 增益必须是 32 到 64 之间的整数。")
+        if (
+            isinstance(wrist_pitch_p_coefficient, bool)
+            or not isinstance(wrist_pitch_p_coefficient, int)
+            or not 16 <= wrist_pitch_p_coefficient <= 32
+        ):
+            raise ValueError("腕部俯仰关节 P 增益必须是 16 到 32 之间的整数。")
         camera_map = dict(cameras or {})
         if getattr(robot, "cameras", {}):
             raise ValueError(
-                "请将摄像头传给 SO100PlusAdapter(cameras=...)，"
-                "不要直接放入 LeRobot Robot；否则机械臂会先于"
-                "摄像头上力。"
+                "LeRobot Robot 内嵌摄像头会重新耦合机械臂和摄像头"
+                "生命周期；请改为传给 SO100PlusAdapter(cameras=...)。"
             )
         invalid_camera_names = tuple(
             name
@@ -266,6 +385,7 @@ class SO100PlusAdapter(ArmAdapter):
         self.motion_limits = motion_limits
         self.motion_config = motion_config
         self.elbow_p_coefficient = elbow_p_coefficient
+        self.wrist_pitch_p_coefficient = wrist_pitch_p_coefficient
         self.cameras = camera_map
         self._stop_requested = Event()
         self._bus_lock = Lock()
@@ -274,6 +394,9 @@ class SO100PlusAdapter(ArmAdapter):
         self._on_telemetry = on_telemetry
         self._telemetry_history: list[SO100PlusTelemetry] = []
         self._last_motion_plan: JointMotionPlan | None = None
+        self._last_settle_report: SO100PlusSettleReport | None = None
+        self._load_limit_streak: dict[str, int] = {}
+        self._temperature_limit_streak: dict[str, int] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -286,6 +409,10 @@ class SO100PlusAdapter(ArmAdapter):
     @property
     def last_motion_plan(self) -> JointMotionPlan | None:
         return self._last_motion_plan
+
+    @property
+    def last_settle_report(self) -> SO100PlusSettleReport | None:
+        return self._last_settle_report
 
     @property
     def camera_names(self) -> tuple[str, ...]:
@@ -305,12 +432,11 @@ class SO100PlusAdapter(ArmAdapter):
     def connect(self) -> None:
         if not self.robot.is_connected:
             follower_bus = self._follower_bus()
-            self._connect_cameras_before_arm()
             try:
                 self.robot.connect()
                 with self._bus_lock:
-                    # 提高肘关节刚度前先把目标同步到实测位置，避免旧目标
-                    # 在 P 增益提高后引起跳动。
+                    # 提高肘关节和腕部俯仰关节刚度前先把目标同步到
+                    # 实测位置，避免旧目标在 P 增益提高后引起跳动。
                     motor_names, present_positions = self._read_all_positions_locked(
                         follower_bus
                     )
@@ -318,32 +444,18 @@ class SO100PlusAdapter(ArmAdapter):
                         "Goal_Position",
                         list(present_positions),
                     )
-                    # 明确恢复上次实机配置：除肘关节外 P=16，
-                    # 肘关节 P=64。不依赖驱动库当前的隐式默认值。
-                    follower_bus.write(
-                        "P_Coefficient",
-                        SO100_PLUS_REAL_HARDWARE_PROFILE.other_motor_p_coefficient,
+                    # 旧版 LeRobot 预设会在每次连接时写回 P=16、
+                    # I=0、D=0 并打开 EEPROM 写锁。先统一上锁，再只
+                    # 恢复与正式实机配置不同的寄存器。
+                    follower_bus.write("Lock", 1)
+                    self._raise_unless_eprom_locked(
+                        follower_bus,
+                        motor_names,
                     )
-                    follower_bus.write(
-                        "P_Coefficient",
-                        self.elbow_p_coefficient,
-                        ELBOW_MOTOR_NAME,
+                    self._write_pid_gains_locked(
+                        follower_bus,
+                        self._saved_arm_pid_gains(),
                     )
-                    actual_p_coefficients = _values_tuple(
-                        follower_bus.read("P_Coefficient")
-                    )
-                    expected_p_coefficients = tuple(
-                        self.elbow_p_coefficient
-                        if name == ELBOW_MOTOR_NAME
-                        else SO100_PLUS_REAL_HARDWARE_PROFILE.other_motor_p_coefficient
-                        for name in motor_names
-                    )
-                    if actual_p_coefficients != expected_p_coefficients:
-                        raise RuntimeError(
-                            f"电机 P 增益写入失败：期望 "
-                            f"{expected_p_coefficients}，实测 "
-                            f"{actual_p_coefficients}。"
-                        )
                     # 只覆盖本次运行的 RAM 加速度，不写 Lock 或
                     # Maximum_Acceleration。
                     follower_bus.write(
@@ -361,25 +473,57 @@ class SO100PlusAdapter(ArmAdapter):
                         or getattr(self.robot, "is_connected", False)
                     ):
                         follower_bus.write("Torque_Enable", 0)
-                        follower_bus.write(
-                            "P_Coefficient",
-                            SO100_PLUS_REAL_HARDWARE_PROFILE.other_motor_p_coefficient,
-                        )
+                        follower_bus.write("Lock", 1)
                 finally:
                     if getattr(self.robot, "is_connected", False):
                         self.robot.disconnect()
                     elif getattr(follower_bus, "is_connected", False):
                         follower_bus.disconnect()
-                    self._disconnect_cameras_after_arm()
                 raise
             self._notify_telemetry(telemetry)
 
     def disconnect(self) -> None:
-        try:
-            if self.robot.is_connected:
-                self.robot.disconnect()
-        finally:
-            self._disconnect_cameras_after_arm()
+        if self.robot.is_connected:
+            self.robot.disconnect()
+
+    def connect_cameras(self) -> None:
+        """按需连接已配置摄像头，不读取或改变机械臂状态。"""
+
+        if not self.cameras:
+            raise RuntimeError("未配置摄像头，无法执行摄像头连接。")
+
+        connected_now: list[object] = []
+        for name, camera in self.cameras.items():
+            if getattr(camera, "is_connected", False):
+                continue
+            try:
+                camera.connect()
+            except Exception as exc:
+                for connected_camera in reversed(connected_now):
+                    try:
+                        connected_camera.disconnect()
+                    except Exception:
+                        pass
+                raise RuntimeError(
+                    f"摄像头 {name!r} 连接失败；机械臂状态未改变。"
+                ) from exc
+            connected_now.append(camera)
+
+    def disconnect_cameras(self) -> None:
+        """断开已配置摄像头，不读取或改变机械臂状态。"""
+
+        errors: list[str] = []
+        for name, camera in reversed(tuple(self.cameras.items())):
+            if not getattr(camera, "is_connected", False):
+                continue
+            try:
+                camera.disconnect()
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+        if errors:
+            raise RuntimeError(
+                "摄像头断开失败：" + "; ".join(errors)
+            )
 
     def capture_camera_images(
         self,
@@ -388,8 +532,8 @@ class SO100PlusAdapter(ArmAdapter):
     ) -> dict[str, object]:
         """抓取 RGB/BGR HWC 图像，键名与 LeRobot observation 一致。"""
 
-        if not self.robot.is_connected:
-            raise RuntimeError("抓取图像前必须先显式连接适配器。")
+        if not self.cameras:
+            raise RuntimeError("未配置摄像头，无法抓取图像。")
 
         images: dict[str, object] = {}
         for name, camera in self.cameras.items():
@@ -410,39 +554,62 @@ class SO100PlusAdapter(ArmAdapter):
             images[f"observation.images.{name}"] = image
         return images
 
-    def _connect_cameras_before_arm(self) -> None:
-        connected: list[object] = []
-        for name, camera in self.cameras.items():
-            if getattr(camera, "is_connected", False):
-                raise RuntimeError(
-                    f"摄像头 {name!r} 已被连接，适配器拒绝重复接管。"
-                )
-            try:
-                camera.connect()
-            except Exception as exc:
-                for connected_camera in reversed(connected):
-                    try:
-                        connected_camera.disconnect()
-                    except Exception:
-                        pass
-                raise RuntimeError(
-                    f"摄像头 {name!r} 连接失败，机械臂保持未连接。"
-                ) from exc
-            connected.append(camera)
+    def read_pid_gains(
+        self,
+        motor_names: Sequence[str] = SO100_PLUS_ARM_JOINT_NAMES,
+    ) -> dict[str, SO100PlusPIDGains]:
+        """读取位置环 PID；不写入 EPROM。"""
 
-    def _disconnect_cameras_after_arm(self) -> None:
-        errors: list[str] = []
-        for name, camera in reversed(tuple(self.cameras.items())):
-            if not getattr(camera, "is_connected", False):
-                continue
-            try:
-                camera.disconnect()
-            except Exception as exc:
-                errors.append(f"{name}: {exc}")
-        if errors:
-            raise RuntimeError(
-                "摄像头断开失败：" + "; ".join(errors)
+        if not self.is_connected:
+            raise RuntimeError("读取 PID 前必须先显式连接机械臂。")
+        names = self._validated_pid_motor_names(motor_names)
+        follower_bus = self._follower_bus()
+        with self._bus_lock:
+            return self._read_pid_gains_locked(follower_bus, names)
+
+    def set_pid_gains(
+        self,
+        gains_by_motor: Mapping[str, SO100PlusPIDGains],
+        *,
+        acknowledge_eprom_write: bool = False,
+    ) -> dict[str, SO100PlusPIDGains]:
+        """有限次更新位置环 PID，并在每个电机写后重新锁定 EPROM。"""
+
+        if not self.is_connected:
+            raise RuntimeError("设置 PID 前必须先显式连接机械臂。")
+        if not acknowledge_eprom_write:
+            raise PermissionError(
+                "PID 位于 EPROM；必须显式确认 acknowledge_eprom_write=True。"
             )
+        names = self._validated_pid_motor_names(tuple(gains_by_motor))
+        requested = {
+            name: gains_by_motor[name]
+            for name in names
+        }
+        if not all(
+            isinstance(gains, SO100PlusPIDGains)
+            for gains in requested.values()
+        ):
+            raise TypeError("PID 配置值必须是 SO100PlusPIDGains。")
+
+        follower_bus = self._follower_bus()
+        telemetry = None
+        with self._motion_lock:
+            with self._bus_lock:
+                _motor_names, present_positions = (
+                    self._read_all_positions_locked(follower_bus)
+                )
+                self._hold_all_positions(follower_bus, present_positions)
+                previous = self._write_pid_gains_locked(
+                    follower_bus,
+                    requested,
+                )
+                telemetry = self._capture_telemetry_locked(
+                    follower_bus,
+                    phase="pid_updated",
+                )
+        self._notify_telemetry(telemetry)
+        return previous
 
     def move_to(
         self,
@@ -465,6 +632,25 @@ class SO100PlusAdapter(ArmAdapter):
             plan = self._plan_move_to_locked(x, y, z)
             self._execute_motion_plan_locked(plan)
 
+    def move_joints(
+        self,
+        joint_radians: Sequence[float],
+    ) -> None:
+        """将六个模型关节移到显式姿态；夹爪位置保持不变。"""
+
+        if not self.is_connected:
+            raise RuntimeError("手臂操作前必须先显式连接机械臂。")
+        self._raise_if_motion_planning_disabled()
+        if self.motion_config is None:
+            raise SO100PlusMotionExecutionDisabledError(
+                "未配置经过确认的运动执行参数，物理移动保持禁用。"
+            )
+
+        with self._motion_lock:
+            self._stop_requested.clear()
+            plan = self._plan_joints_locked(joint_radians)
+            self._execute_motion_plan_locked(plan)
+
     def plan_move_to(
         self,
         x: float,
@@ -479,6 +665,19 @@ class SO100PlusAdapter(ArmAdapter):
 
         with self._motion_lock:
             return self._plan_move_to_locked(x, y, z)
+
+    def plan_joints(
+        self,
+        joint_radians: Sequence[float],
+    ) -> JointMotionPlan:
+        """读取当前姿态并规划六关节目标，但绝不写入电机。"""
+
+        if not self.is_connected:
+            raise RuntimeError("运动规划前必须先显式连接机械臂。")
+        self._raise_if_motion_planning_disabled()
+
+        with self._motion_lock:
+            return self._plan_joints_locked(joint_radians)
 
     def _raise_if_motion_planning_disabled(self) -> None:
         if self.kinematics is None or self.motion_limits is None:
@@ -509,10 +708,34 @@ class SO100PlusAdapter(ArmAdapter):
         self._last_motion_plan = plan
         return plan
 
+    def _plan_joints_locked(
+        self,
+        joint_radians: Sequence[float],
+    ) -> JointMotionPlan:
+        follower_bus = self._follower_bus()
+        with self._bus_lock:
+            driver_degrees = self._read_arm_driver_degrees_locked(
+                follower_bus
+            )
+
+        current_joint_radians = (
+            self.kinematics.driver_degrees_to_model_radians(driver_degrees)
+        )
+        plan = self.kinematics.plan_joint_pose(
+            current_joint_radians=current_joint_radians,
+            target_joint_radians=joint_radians,
+            limits=self.motion_limits,
+        )
+        self._last_motion_plan = plan
+        return plan
+
     def _execute_motion_plan_locked(self, plan: JointMotionPlan) -> None:
         if not plan.waypoints_radians:
             return
 
+        self._last_settle_report = None
+        self._load_limit_streak.clear()
+        self._temperature_limit_streak.clear()
         follower_bus = self._follower_bus()
         with self._bus_lock:
             motor_names, held_positions = self._read_all_positions_locked(
@@ -735,7 +958,7 @@ class SO100PlusAdapter(ArmAdapter):
         if cartesian_error_m > self.motion_config.cartesian_tolerance_m:
             with self._bus_lock:
                 self._hold_all_positions(follower_bus, final_positions)
-            raise SO100PlusArmSafetyError(
+            raise SO100PlusMotionConvergenceError(
                 f"夹爪 TCP 位置误差 {cartesian_error_m * 1000:.6f} mm 超过 "
                 f"{self.motion_config.cartesian_tolerance_m * 1000:.1f} mm，"
                 "已保持当前位置。"
@@ -751,6 +974,8 @@ class SO100PlusAdapter(ArmAdapter):
         """轮询真实关节，全部到位后才允许进入下一个轨迹点。"""
 
         elapsed_seconds = 0.0
+        settle_elapsed_seconds = 0.0
+        settle_position_samples: list[tuple[float, ...]] = []
         while True:
             self._raise_if_stop_requested()
             step_telemetry = None
@@ -783,11 +1008,25 @@ class SO100PlusAdapter(ArmAdapter):
                 if step_telemetry is not None:
                     self._notify_telemetry(step_telemetry)
 
-            if (
+            within_joint_tolerance = (
                 max_error
                 <= self.motion_config.joint_position_tolerance_degrees
-            ):
-                return present_positions
+            )
+            if within_joint_tolerance:
+                settle_position_samples.append(present_positions)
+                if (
+                    settle_elapsed_seconds
+                    >= self.motion_config.final_settle_seconds
+                ):
+                    self._last_settle_report = self._build_settle_report(
+                        motor_names,
+                        settle_position_samples,
+                        settle_elapsed_seconds,
+                    )
+                    return present_positions
+            else:
+                settle_elapsed_seconds = 0.0
+                settle_position_samples.clear()
 
             if (
                 elapsed_seconds
@@ -811,7 +1050,17 @@ class SO100PlusAdapter(ArmAdapter):
                     present_positions,
                     target_positions,
                 )
-                raise SO100PlusArmSafetyError(
+                if within_joint_tolerance:
+                    raise SO100PlusMotionConvergenceError(
+                        f"关节已进入 "
+                        f"{self.motion_config.joint_position_tolerance_degrees:.1f}°"
+                        "容差，但在 "
+                        f"{self.motion_config.waypoint_timeout_seconds:.1f} 秒内"
+                        "没有连续稳定 "
+                        f"{self.motion_config.final_settle_seconds:.2f} 秒，"
+                        "已保持当前位置。"
+                    )
+                raise SO100PlusMotionConvergenceError(
                     f"关节 {max_error_joint} 在 "
                     f"{self.motion_config.waypoint_timeout_seconds:.1f} 秒内未到位："
                     f"目标 {max_error_target:.6f}°、实测 "
@@ -828,6 +1077,8 @@ class SO100PlusAdapter(ArmAdapter):
             )
             stopped_while_waiting = self._wait(wait_seconds)
             elapsed_seconds += wait_seconds
+            if within_joint_tolerance:
+                settle_elapsed_seconds += wait_seconds
             if stopped_while_waiting or self._stop_requested.is_set():
                 if not self._stop_requested.is_set():
                     with self._bus_lock:
@@ -841,6 +1092,50 @@ class SO100PlusAdapter(ArmAdapter):
                 raise SO100PlusMotionStoppedError(
                     "手臂动作已被 stop() 取消。"
                 )
+
+    def _build_settle_report(
+        self,
+        motor_names: tuple[str, ...],
+        position_samples: Sequence[tuple[float, ...]],
+        duration_seconds: float,
+    ) -> SO100PlusSettleReport:
+        arm_samples = tuple(
+            self._arm_values_by_name(motor_names, positions)
+            for positions in position_samples
+        )
+        position_span_degrees = tuple(
+            max(sample[index] for sample in arm_samples)
+            - min(sample[index] for sample in arm_samples)
+            for index in range(len(SO100_PLUS_ARM_JOINT_NAMES))
+        )
+        tcp_samples = tuple(
+            self.kinematics.forward_position(
+                self.kinematics.driver_degrees_to_model_radians(sample)
+            )
+            for sample in arm_samples
+        )
+        tcp_min_m = tuple(
+            min(sample[index] for sample in tcp_samples)
+            for index in range(3)
+        )
+        tcp_max_m = tuple(
+            max(sample[index] for sample in tcp_samples)
+            for index in range(3)
+        )
+        tcp_mean_m = tuple(
+            sum(sample[index] for sample in tcp_samples) / len(tcp_samples)
+            for index in range(3)
+        )
+        return SO100PlusSettleReport(
+            motor_names=SO100_PLUS_ARM_JOINT_NAMES,
+            position_samples_degrees=arm_samples,
+            position_span_degrees=position_span_degrees,
+            tcp_samples_m=tcp_samples,
+            tcp_min_m=tcp_min_m,
+            tcp_max_m=tcp_max_m,
+            tcp_mean_m=tcp_mean_m,
+            duration_seconds=duration_seconds,
+        )
 
     def open_gripper(self) -> None:
         self._move_gripper_to(self.gripper_config.open_degrees)
@@ -863,43 +1158,40 @@ class SO100PlusAdapter(ArmAdapter):
             )
         self._notify_telemetry(telemetry)
 
-    def disable_torque(self) -> None:
-        """关闭全部 follower 力矩；机械臂会立即变软。"""
+    def disable_torque(self, *, emergency: bool = False) -> None:
+        """在 follower_rest 正常释放力矩，或显式执行紧急释放。"""
 
         if not self.is_connected:
             raise RuntimeError("关闭力矩前必须先显式连接机械臂。")
+        if not isinstance(emergency, bool):
+            raise TypeError("emergency 必须是布尔值。")
 
         self._stop_requested.set()
         follower_bus = self._follower_bus()
         with self._bus_lock:
+            if not emergency:
+                self._raise_unless_at_storage_rest_locked(follower_bus)
             follower_bus.write("Torque_Enable", 0)
-            follower_bus.write(
-                "P_Coefficient",
-                SO100_PLUS_REAL_HARDWARE_PROFILE.other_motor_p_coefficient,
+            follower_bus.write("Lock", 1)
+            self._raise_unless_eprom_locked(
+                follower_bus,
+                tuple(follower_bus.motor_names),
             )
             torque_enabled = tuple(
                 int(value)
                 for value in follower_bus.read("Torque_Enable")
             )
-            restored_p_coefficients = _values_tuple(
-                follower_bus.read("P_Coefficient")
-            )
             if any(torque_enabled):
                 raise RuntimeError(
                     f"力矩未能全部关闭：{torque_enabled}；请立即物理断电。"
                 )
-            if any(
-                value != RESTORED_ELBOW_P_COEFFICIENT
-                for value in restored_p_coefficients
-            ):
-                raise RuntimeError(
-                    f"电机 P 增益未全部恢复为 "
-                    f"{RESTORED_ELBOW_P_COEFFICIENT}：实测 "
-                    f"{restored_p_coefficients}；请立即物理断电。"
-                )
             telemetry = self._capture_telemetry_locked(
                 follower_bus,
-                phase="torque_disabled",
+                phase=(
+                    "torque_disabled_emergency"
+                    if emergency
+                    else "torque_disabled"
+                ),
             )
         self._notify_telemetry(telemetry)
 
@@ -990,6 +1282,168 @@ class SO100PlusAdapter(ArmAdapter):
                 f"机器人中没有 follower "
                 f"{self.gripper_config.follower_name!r}。"
             ) from error
+
+    @staticmethod
+    def _validated_pid_motor_names(
+        motor_names: Sequence[str],
+    ) -> tuple[str, ...]:
+        names = tuple(motor_names)
+        if not names:
+            raise ValueError("PID 电机列表不能为空。")
+        if len(set(names)) != len(names):
+            raise ValueError("PID 电机列表不能包含重复名称。")
+        invalid = tuple(
+            name
+            for name in names
+            if name not in SO100_PLUS_ARM_JOINT_NAMES
+        )
+        if invalid:
+            raise ValueError(
+                f"PID 只允许配置六个手臂关节：{invalid}。"
+            )
+        return names
+
+    @staticmethod
+    def _read_pid_gains_locked(
+        follower_bus,
+        motor_names: Sequence[str],
+    ) -> dict[str, SO100PlusPIDGains]:
+        return {
+            name: SO100PlusPIDGains(
+                p=int(
+                    _single_value(
+                        follower_bus.read("P_Coefficient", name)
+                    )
+                ),
+                i=int(
+                    _single_value(
+                        follower_bus.read("I_Coefficient", name)
+                    )
+                ),
+                d=int(
+                    _single_value(
+                        follower_bus.read("D_Coefficient", name)
+                    )
+                ),
+            )
+            for name in motor_names
+        }
+
+    def _saved_arm_pid_gains(self) -> dict[str, SO100PlusPIDGains]:
+        profile = SO100_PLUS_REAL_HARDWARE_PROFILE
+        return {
+            name: SO100PlusPIDGains(
+                p=(
+                    self.elbow_p_coefficient
+                    if name == ELBOW_MOTOR_NAME
+                    else (
+                        self.wrist_pitch_p_coefficient
+                        if name == WRIST_PITCH_MOTOR_NAME
+                        else profile.other_motor_p_coefficient
+                    )
+                ),
+                i=(
+                    profile.tuned_motor_i_coefficient
+                    if name in TUNED_PID_MOTOR_NAMES
+                    else 0
+                ),
+                d=(
+                    profile.tuned_motor_d_coefficient
+                    if name in TUNED_PID_MOTOR_NAMES
+                    else 0
+                ),
+            )
+            for name in SO100_PLUS_ARM_JOINT_NAMES
+        }
+
+    def _write_pid_gains_locked(
+        self,
+        follower_bus,
+        requested: Mapping[str, SO100PlusPIDGains],
+    ) -> dict[str, SO100PlusPIDGains]:
+        names = tuple(requested)
+        previous = self._read_pid_gains_locked(follower_bus, names)
+        touched: list[str] = []
+        try:
+            for name in names:
+                before = previous[name]
+                after = requested[name]
+                if before == after:
+                    continue
+                follower_bus.write("Lock", 0, name)
+                touched.append(name)
+                for register, old_value, new_value in (
+                    ("P_Coefficient", before.p, after.p),
+                    ("I_Coefficient", before.i, after.i),
+                    ("D_Coefficient", before.d, after.d),
+                ):
+                    if old_value != new_value:
+                        follower_bus.write(register, new_value, name)
+                follower_bus.write("Lock", 1, name)
+                touched.remove(name)
+        finally:
+            for name in touched:
+                follower_bus.write("Lock", 1, name)
+
+        actual = self._read_pid_gains_locked(follower_bus, names)
+        if actual != requested:
+            raise RuntimeError(
+                f"PID 写入失败：期望 {requested}，实测 {actual}。"
+            )
+        self._raise_unless_eprom_locked(follower_bus, names)
+        return previous
+
+    @staticmethod
+    def _raise_unless_eprom_locked(
+        follower_bus,
+        motor_names: Sequence[str],
+    ) -> None:
+        unlocked = tuple(
+            name
+            for name in motor_names
+            if int(_single_value(follower_bus.read("Lock", name))) != 1
+        )
+        if unlocked:
+            raise RuntimeError(
+                f"电机 EEPROM 写锁未能关闭：{unlocked}；"
+                "已停止后续操作。"
+            )
+
+    def _raise_unless_at_storage_rest_locked(self, follower_bus) -> None:
+        motor_names, positions = self._read_all_positions_locked(follower_bus)
+        arm_positions = self._arm_values_by_name(motor_names, positions)
+        profile = SO100_PLUS_REAL_HARDWARE_PROFILE
+        errors = tuple(
+            abs(actual - expected)
+            for actual, expected in zip(
+                arm_positions,
+                profile.storage_rest_driver_degrees,
+                strict=True,
+            )
+        )
+        violating = tuple(
+            index
+            for index, (error, tolerance) in enumerate(
+                zip(
+                    errors,
+                    profile.storage_rest_tolerances_degrees,
+                    strict=True,
+                )
+            )
+            if error > tolerance
+        )
+        if not violating:
+            return
+
+        index = max(violating, key=errors.__getitem__)
+        name = SO100_PLUS_ARM_JOINT_NAMES[index]
+        raise SO100PlusTorqueReleaseSafetyError(
+            f"普通关闭力矩已拒绝：当前位置不是已验证的 follower_rest；"
+            f"{name} 偏差 {errors[index]:.3f}° 超过 "
+            f"{profile.storage_rest_tolerances_degrees[index]:.1f}°。"
+            "请先受控返回 follower_rest；仅在过温、过载、碰撞或人工"
+            "急停时显式使用 emergency=True，并托住机械臂。"
+        )
 
     @staticmethod
     def _read_arm_driver_degrees_locked(
@@ -1113,26 +1567,111 @@ class SO100PlusAdapter(ArmAdapter):
 
     def _raise_if_arm_telemetry_unsafe(
         self,
-        start: SO100PlusTelemetry,
+        _start: SO100PlusTelemetry,
         current: SO100PlusTelemetry,
         *,
         follower_bus=None,
         present_positions: tuple[float, ...] | None = None,
     ) -> None:
         reason = None
-        maximum_load = max(current.load_magnitude)
-        if maximum_load > self.motion_config.load_limit:
+        critical_load_samples = tuple(
+            (load, motor_name)
+            for motor_name, load in zip(
+                current.motor_names,
+                current.load_magnitude,
+                strict=True,
+            )
+            if load >= self.motion_config.critical_load_limit
+        )
+        if critical_load_samples:
+            maximum_load, motor_name = max(critical_load_samples)
             reason = (
-                f"手臂负载 {maximum_load:.1f} 超过限制 "
-                f"{self.motion_config.load_limit:.1f}"
+                f"手臂电机 {motor_name} 负载 "
+                f"{maximum_load:.1f} 达到紧急限制 "
+                f"{self.motion_config.critical_load_limit:.1f}"
             )
         else:
-            maximum_temperature = max(current.temperature_raw)
-            if maximum_temperature >= self.motion_config.max_temperature_celsius:
-                reason = (
-                    f"手臂温度 {maximum_temperature:.1f}°C 达到限制 "
-                    f"{self.motion_config.max_temperature_celsius:.1f}°C"
+            next_load_streak: dict[str, int] = {}
+            confirmed_load_samples: list[tuple[float, str, int]] = []
+            for motor_name, load in zip(
+                current.motor_names,
+                current.load_magnitude,
+                strict=True,
+            ):
+                if load < self.motion_config.load_limit:
+                    continue
+                count = self._load_limit_streak.get(motor_name, 0) + 1
+                next_load_streak[motor_name] = count
+                if count >= self.motion_config.load_confirmation_samples:
+                    confirmed_load_samples.append(
+                        (load, motor_name, count)
+                    )
+            self._load_limit_streak = next_load_streak
+            if confirmed_load_samples:
+                maximum_load, motor_name, count = max(
+                    confirmed_load_samples
                 )
+                reason = (
+                    f"手臂电机 {motor_name} 负载 "
+                    f"{maximum_load:.1f} 连续 {count} 次达到限制 "
+                    f"{self.motion_config.load_limit:.1f}"
+                )
+
+        if reason is None:
+            critical_samples = tuple(
+                (temperature, motor_name)
+                for motor_name, temperature in zip(
+                    current.motor_names,
+                    current.temperature_raw,
+                    strict=True,
+                )
+                if (
+                    temperature
+                    >= self.motion_config.critical_temperature_celsius
+                )
+            )
+            if critical_samples:
+                maximum_temperature, motor_name = max(critical_samples)
+                reason = (
+                    f"手臂电机 {motor_name} 温度 "
+                    f"{maximum_temperature:.1f}°C 达到紧急限制 "
+                    f"{self.motion_config.critical_temperature_celsius:.1f}°C"
+                )
+            else:
+                next_streak: dict[str, int] = {}
+                confirmed_samples: list[tuple[float, str, int]] = []
+                for motor_name, temperature in zip(
+                    current.motor_names,
+                    current.temperature_raw,
+                    strict=True,
+                ):
+                    if (
+                        temperature
+                        < self.motion_config.max_temperature_celsius
+                    ):
+                        continue
+                    count = (
+                        self._temperature_limit_streak.get(motor_name, 0)
+                        + 1
+                    )
+                    next_streak[motor_name] = count
+                    if (
+                        count
+                        >= self.motion_config.temperature_confirmation_samples
+                    ):
+                        confirmed_samples.append(
+                            (temperature, motor_name, count)
+                        )
+                self._temperature_limit_streak = next_streak
+                if confirmed_samples:
+                    maximum_temperature, motor_name, count = max(
+                        confirmed_samples
+                    )
+                    reason = (
+                        f"手臂电机 {motor_name} 温度 "
+                        f"{maximum_temperature:.1f}°C 连续 {count} 次达到限制 "
+                        f"{self.motion_config.max_temperature_celsius:.1f}°C"
+                    )
         if reason is None:
             return
         if follower_bus is not None and present_positions is not None:

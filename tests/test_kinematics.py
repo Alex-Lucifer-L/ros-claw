@@ -8,7 +8,7 @@ from rosclaw_mini.arm.kinematics import (
     InverseKinematicsError,
     SO100PlusKinematics,
     SO100_PLUS_GRIPPER_TCP_OFFSET_M,
-    SO100_PLUS_JOYCON_REST_RADIANS,
+    SO100_PLUS_JOYCON_INITIAL_RADIANS,
 )
 from rosclaw_mini.safety.limits import (
     AxisLimits,
@@ -19,8 +19,8 @@ from rosclaw_mini.safety.limits import (
 )
 
 
-def test_joycon_plus_rest_pose_matches_controller_source():
-    assert SO100_PLUS_JOYCON_REST_RADIANS == (
+def test_joycon_plus_initial_pose_matches_controller_source():
+    assert SO100_PLUS_JOYCON_INITIAL_RADIANS == (
         0.0,
         -3.1,
         3.0,
@@ -203,4 +203,44 @@ def test_plan_position_rejects_target_outside_configured_workspace():
             current_joint_radians=(0.0,) * 6,
             target_position_m=(1.01, 0.0, 0.0),
             limits=make_motion_limits(),
+        )
+
+
+def test_plan_joint_pose_validates_target_and_splits_path_without_ik():
+    robot = FakeKinematicsRobot()
+    kinematics = SO100PlusKinematics(robot=robot)
+    limits = make_motion_limits(max_step=0.1)
+
+    plan = kinematics.plan_joint_pose(
+        current_joint_radians=(0.0,) * 6,
+        target_joint_radians=(0.25, 0.0, 0.0, 0.0, 0.0, 0.0),
+        limits=limits,
+    )
+
+    assert plan.target_joint_radians == pytest.approx(
+        (0.25, 0.0, 0.0, 0.0, 0.0, 0.0)
+    )
+    assert plan.target_position_m == pytest.approx(
+        (0.35127, -0.00690, 0.00118)
+    )
+    assert len(plan.waypoints_radians) == 3
+    assert robot.solve_calls == []
+
+
+def test_plan_joint_pose_rejects_target_tcp_outside_workspace():
+    kinematics = SO100PlusKinematics(robot=FakeKinematicsRobot())
+    limits = make_motion_limits()
+
+    with pytest.raises(LimitViolationError, match="x"):
+        kinematics.plan_joint_pose(
+            current_joint_radians=(0.0,) * 6,
+            target_joint_radians=(1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            limits=MotionLimits(
+                workspace=WorkspaceLimits(
+                    x=AxisLimits(-0.2, 0.2),
+                    y=AxisLimits(-1.0, 1.0),
+                    z=AxisLimits(-1.0, 1.0),
+                ),
+                joints=limits.joints,
+            ),
         )

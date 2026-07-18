@@ -1,0 +1,132 @@
+{
+  "classification": "joycon_initial_orientation_grid_candidate_not_real_hardware_certification",
+  "generated_at_utc": "2026-07-18T02:29:14.787434+00:00",
+  "inputs": {
+    "model": "lerobot-joycon_plus/lerobot/common/robot_devices/controllers/scene_plus.xml",
+    "candidate_report": "artifacts/so100_plus_workspace/workspace_report.json",
+    "support_plane_z_m": 0.0,
+    "base_driver_degrees": {
+      "minimum": -19.599609,
+      "maximum": 31.201172
+    },
+    "rest_joint_radians": [
+      0.0,
+      -3.1,
+      3.0,
+      0.0,
+      0.0,
+      1.57
+    ],
+    "rest_tcp_m": [
+      0.3035714232672181,
+      -0.0011854942801636243,
+      0.17932848288990053
+    ],
+    "tcp_orientation": "JoyCon controller initial rotation matrix"
+  },
+  "grid": {
+    "bounds_source": "explicit_refinement_bounds",
+    "step_m": 0.01,
+    "shape": [
+      25,
+      11,
+      19
+    ],
+    "point_count": 5225,
+    "x_m": {
+      "minimum": 0.28357142326721807,
+      "maximum": 0.5235714232672181
+    },
+    "y_m": {
+      "minimum": -0.06118549428016362,
+      "maximum": 0.03881450571983638
+    },
+    "z_m": {
+      "minimum": 0.15932848288990054,
+      "maximum": 0.33932848288990053
+    }
+  },
+  "path_check": {
+    "start": "JoyCon controller initial joint position",
+    "max_joint_step_degrees": 1.0,
+    "checks": [
+      "joint limits",
+      "IK FK residual",
+      "endpoint self/table collision",
+      "interpolated path self/table collision",
+      "TCP z >= 0"
+    ]
+  },
+  "results": {
+    "ik_failed": 1113,
+    "endpoint_collision": 0,
+    "path_collision": 0,
+    "valid": 4112,
+    "valid_ratio": 0.7869856459330143,
+    "ik_failure_types": {
+      "LimitViolationError": 257,
+      "InverseKinematicsError": 856
+    },
+    "valid_endpoint_aabb_m": {
+      "x": {
+        "minimum": 0.28357142326721807,
+        "maximum": 0.5235714232672181
+      },
+      "y": {
+        "minimum": -0.06118549428016362,
+        "maximum": 0.03881450571983638
+      },
+      "z": {
+        "minimum": 0.15932848288990054,
+        "maximum": 0.33932848288990053
+      }
+    }
+  },
+  "largest_all_valid_grid_box_containing_rest": {
+    "x": {
+      "minimum": 0.3035714232672181,
+      "maximum": 0.4435714232672181,
+      "span": 0.14,
+      "grid_points": 15
+    },
+    "y": {
+      "minimum": -0.051185494280163626,
+      "maximum": 0.028814505719836375,
+      "span": 0.08,
+      "grid_points": 9
+    },
+    "z": {
+      "minimum": 0.16932848288990052,
+      "maximum": 0.30932848288990056,
+      "span": 0.14000000000000004,
+      "grid_points": 15
+    },
+    "point_count": 2025,
+    "grid_step_m": 0.01,
+    "continuous_box_volume_m3": 0.0015680000000000006,
+    "warning": "All sampled grid points and their rest-to-target paths passed, but unsampled interior and arbitrary point-to-point paths are not proven."
+  },
+  "box_directed_neighbor_check": {
+    "directed_edge_count": 11160,
+    "valid": 11160,
+    "ik_failed": 0,
+    "endpoint_collision": 0,
+    "path_collision": 0,
+    "all_valid": true,
+    "maximum_joint_delta_degrees": 14.743794091551848,
+    "ik_failure_types": {},
+    "meaning": "Every directed 1-grid-step move is re-solved from its source pose and collision-checked."
+  },
+  "artifacts": {
+    "grid": "artifacts/so100_plus_rest_workspace/rest_workspace_grid.npz",
+    "plot": "artifacts/so100_plus_rest_workspace/rest_workspace_views.png",
+    "report": "artifacts/so100_plus_rest_workspace/rest_workspace_report.json"
+  },
+  "limitations": [
+    "The box is proven only at sampled Cartesian grid points.",
+    "Every valid point was checked from the JoyCon controller initial pose.",
+    "The gripper orientation is fixed to the JoyCon controller initial pose.",
+    "Real backlash, sag, cable routing, payload, and thermal effects are absent.",
+    "Do not copy this box into real WorkspaceLimits before refinement and hardware checks."
+  ]
+}

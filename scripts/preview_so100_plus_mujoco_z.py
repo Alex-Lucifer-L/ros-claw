@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from rosclaw_mini.arm.kinematics import (
-    SO100_PLUS_JOYCON_REST_RADIANS,
+    SO100_PLUS_JOYCON_INITIAL_RADIANS,
     SO100PlusKinematics,
 )
 
@@ -72,7 +72,7 @@ def main() -> int:
 
     model = mujoco.MjModel.from_xml_path(str(model_path))
     data = mujoco.MjData(model)
-    rest_qpos = np.asarray(SO100_PLUS_JOYCON_REST_RADIANS, dtype=float)
+    rest_qpos = np.asarray(SO100_PLUS_JOYCON_INITIAL_RADIANS, dtype=float)
     kinematics = SO100PlusKinematics()
     tcp_start_m = kinematics.forward_position(rest_qpos)
     tcp_target_m = (

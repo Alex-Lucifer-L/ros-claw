@@ -4,7 +4,10 @@ from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.gateway.command.gateway import run_command
 from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
-from rosclaw_mini.skills.arm_skills import build_arm_skills
+from rosclaw_mini.skills.arm_skills import (
+    build_arm_skills,
+    build_so100_plus_right_follower_arm_skills,
+)
 from rosclaw_mini.skills.base import SkillDefinition
 
 
@@ -82,6 +85,41 @@ def test_reject_unsafe_command():
     )
     assert result.success is False
     assert "x" in result.message
+
+
+def test_right_follower_gateway_uses_formal_workspace_boundaries():
+    right_adapter = MockArmAdapter()
+    right_skills = build_so100_plus_right_follower_arm_skills(right_adapter)
+
+    accepted = run_command(
+        make_command(
+            params={
+                "x": 0.3135714232672181,
+                "y": -0.041185494280163625,
+                "z": 0.17932848288990053,
+            }
+        ),
+        right_skills,
+    )
+    rejected = run_command(
+        make_command(
+            params={
+                "x": 0.313,
+                "y": -0.041185494280163625,
+                "z": 0.17932848288990053,
+            }
+        ),
+        right_skills,
+    )
+
+    assert accepted.success is True
+    assert right_adapter.position == (
+        0.3135714232672181,
+        -0.041185494280163625,
+        0.17932848288990053,
+    )
+    assert rejected.success is False
+    assert "x" in rejected.message
 
 
 def test_reject_unknown_skill():
