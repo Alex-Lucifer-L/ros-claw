@@ -36,7 +36,8 @@ def test_move_skill_is_disabled_without_explicit_workspace_limits():
 
     assert skills_without_limits["move_arm"].enabled is False
     assert skills_without_limits["open_gripper"].enabled is True
-    assert skills_without_limits["disable_torque"].enabled is True
+    assert skills_without_limits["disable_torque"].enabled is False
+    assert skills_without_limits["disable_torque"].risk_level == "high"
 
 
 def test_right_follower_skills_use_registered_formal_workspace():
