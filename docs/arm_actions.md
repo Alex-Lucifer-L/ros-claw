@@ -464,6 +464,31 @@ adapter.stop()
 `torque_disabled_emergency` 遥测，并要求人员托住机械臂。不能把
 `disconnect()` 当成关力矩，软件也不替代物理断电。
 
+### 当前 `stop` 的系统限制
+
+`SO100PlusAdapter.stop()` 已能设置停止事件、读取当前位置并把当前位置
+写回目标位置，因此 Adapter 层的取消能力已经存在。
+
+但是当前 `main.py` 和 `run_command()` 使用同步执行方式：
+
+```text
+读取 move_arm
+→ run_command() 等待 move_to() 完成
+→ 完成后才能读取下一条命令
+```
+
+因此，在同一个命令行输入循环中，用户不能在 `move_to()` 执行期间再输入
+`stop` 来中断它。当前只有另一个线程或独立真机流程调用 `stop()` 时，
+才能中断正在执行的 Adapter 轨迹。
+
+这表示：
+
+- Adapter 层停止能力：已实现；
+- 当前同步 Gateway 的运动中取消能力：尚未实现；
+- `stop()` 不是独立硬件急停，也不能替代物理断电。
+
+后续需要通过执行线程、任务队列或 ROS 2 Action 的取消机制实现系统级中断。
+
 ## 9. 连接时会发生什么
 
 `ManipulatorRobot.connect()` 不是只读操作。它会：
@@ -530,7 +555,10 @@ adapter.disconnect_cameras()
 | `open_gripper` | `open_gripper()` | 已实现 |
 | `close_gripper` | `close_gripper()` | 已实现 |
 | `stop` | `stop()` | 已实现 |
-| `disable_torque` | `disable_torque()` | 已实现；会使机械臂变软 |
+| `disable_torque` | `disable_torque()` | 底层已实现；高风险，默认不向 Gateway/LLM 开放 |
+
+`disable_torque()` 仍供本地维护和受控关闭流程直接调用；默认禁用的是
+普通 Gateway/LLM Skill 入口，不是删除底层卸力能力。
 
 `main.py` 始终创建 `MockArmAdapter`，因此运行普通交互入口不会连接真机。
 真实 Adapter 已可传入 `build_arm_skills()`，但项目尚未实现一个面向终端用户的
