@@ -82,8 +82,8 @@ def build_arm_skills(
     disable_torque_skill = SkillDefinition(
         skill_name="disable_torque",
         description="关闭机械臂全部关节力矩，使机械臂变软",
-        risk_level="medium",
-        enabled=True,
+        risk_level="high",
+        enabled=False,
         params_schema={},
         handler=arm_handlers.disable_torque,
     )
