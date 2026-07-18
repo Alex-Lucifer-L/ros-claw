@@ -315,7 +315,7 @@ Command(
 | `open_gripper` | `low` | 无 | `open_gripper()` | 启用 |
 | `close_gripper` | `low` | 无 | `close_gripper()` | 启用 |
 | `stop` | `low` | 无 | `stop()` | 启用 |
-| `disable_torque` | `medium` | 无 | `disable_torque()` | 启用 |
+| `disable_torque` | `high` | 无 | `disable_torque()` | 默认禁用 |
 
 `move_arm` 的参数单位由 Adapter 接口统一定义为米，表示机械臂底座坐标系中的
 绝对 TCP 坐标。
@@ -698,6 +698,11 @@ JSONL，不会自行修改正式配置。最终又用完全相同的六关节目
 `stop()` 会读取所有电机的 `Present_Position`，再写回 `Goal_Position`。
 它的含义是取消剩余轨迹并保持当前位置，力矩仍然开启。
 
+当前 `main.py` 和 `run_command()` 使用同步执行方式：当 `move_to()` 尚未
+返回时，同一个命令行输入循环无法读取新的 `stop` 命令。因此 Adapter
+底层停止能力已经实现，但当前同步 Gateway 的运动中取消能力尚未实现；
+只有另一个线程或独立真机流程调用 `stop()` 时才能中断正在执行的轨迹。
+
 ### `disable_torque()`
 
 普通 `disable_torque()` 会先读取六个手臂关节，确认机械臂处于本机
@@ -708,6 +713,10 @@ Rest 条件时会拒绝普通力矩释放。
 只有过温、过载、碰撞、人工急停，或者受控收纳本身失败时，调用方才可
 显式使用 `disable_torque(emergency=True)`。紧急释放会记录独立遥测
 阶段，并要求操作者托住机械臂。两种模式都不会重写 P/I/D。
+
+`disable_torque()` 是本地维护和真机安全收尾原子操作，默认不开放为
+Gateway/LLM 可执行 Skill。普通用户命令不能直接触发卸力；系统关闭流程
+仍可在完成 `stop()`、返回并验证 `follower_rest` 后显式调用 Adapter。
 
 ### `disconnect()`
 
@@ -819,7 +828,6 @@ PYTHONPATH=src python -m rosclaw_mini.main
 {"skill_name": "open_gripper", "params": {}}
 {"skill_name": "close_gripper", "params": {}}
 {"skill_name": "stop", "params": {}}
-{"skill_name": "disable_torque", "params": {}}
 ```
 
 输入：
