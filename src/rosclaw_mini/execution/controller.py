@@ -1,8 +1,9 @@
+###此文件定义了一个名为 ExecutionController 的类，它负责管理命令的执行。该类使用一个线程来运行命令，以便在后台执行任务，而不会阻塞主线程。初学者可以将其理解为一个“命令执行器”，它接收命令并在单独的线程中运行这些命令，从而实现异步执行。
 from collections.abc import Callable
 from threading import Thread, Lock
 
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
-CommandRunner = Callable[[Command], ExecutionResult]
+CommandRunner = Callable[[Command], ExecutionResult]###表示一个可调用对象（函数或方法），它接受一个 Command 对象并返回一个 ExecutionResult 对象。这个类型别名用于表示执行命令的逻辑。
 
 class ExecutionController:
     """
@@ -43,7 +44,7 @@ class ExecutionController:
         self._worker.start()
         return True
         
-    def request_stop(self,command: Command) -> None:
+    def request_stop(self,command: Command) -> ExecutionResult:
         """
         请求停止当前正在执行的命令。这个方法会检查当前是否有命令正在执行，如果有，它会尝试停止该命令。  
         返回 True 如果成功请求停止，返回 False 如果当前没有命令正在执行。
@@ -82,6 +83,13 @@ class ExecutionController:
         """
         with self._lock:
             return self._running
+    def last_result(self) -> ExecutionResult | None:
+        """
+        获取上一次命令的执行结果。这个方法会返回一个 ExecutionResult 对象，表示上一次命令的执行结果。
+        如果没有命令执行过，则返回 None。
+        """
+        with self._lock:
+            return self._last_result
         
     def wait(self,timeout: float | None = None) -> ExecutionResult | None:
         """
