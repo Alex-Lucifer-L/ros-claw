@@ -34,6 +34,7 @@ class RecordingAdapter(ArmAdapter):
     ) -> None:
         self.connected = True
         self.calls: list[str] = []
+        self.disconnect_event = Event()
         self.stop_event = stop_event
         self.stop_error = stop_error
         self.disconnect_on_stop = disconnect_on_stop
@@ -49,6 +50,7 @@ class RecordingAdapter(ArmAdapter):
     def disconnect(self) -> None:
         self.calls.append("disconnect")
         self.connected = False
+        self.disconnect_event.set()
 
     def move_to(self, x: float, y: float, z: float) -> None:
         self.calls.append("move_to")
@@ -95,7 +97,7 @@ def _certified_robot_config(tmp_path: Path) -> SO100PlusRobotConfig:
     calibration_dir.mkdir()
     (calibration_dir / "right_follower.json").write_bytes(source.read_bytes())
     return SO100PlusRobotConfig(
-        port="/path-not-accessed/robot",
+        port="/dev/lerobot_right",
         calibration_dir=calibration_dir,
         follower_name="right",
     )
@@ -234,10 +236,11 @@ def test_runtime_shutdown_timeout_keeps_adapter_connected_until_worker_finishes(
     assert "disable_torque" not in adapter.calls
 
     allow_motion_finish.set()
-    assert controller.wait(timeout=1.0) is not None
+    assert adapter.disconnect_event.wait(timeout=1.0) is True
     runtime.shutdown()
 
-    assert adapter.calls == ["stop", "stop", "disconnect"]
+    assert controller.is_running() is False
+    assert adapter.calls == ["stop", "disconnect"]
     assert adapter.is_connected is False
 
 
@@ -570,6 +573,77 @@ def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertifi
     assert "move_to" not in adapters[1].calls
 
     runtime.shutdown()
+
+
+@pytest.mark.parametrize(
+    "full_turn_offset",
+    (2 * math.pi, -2 * math.pi),
+    ids=("plus_2pi", "minus_2pi"),
+)
+def test_so100_plus_runtime_rejects_full_turn_joint_aliases(
+    tmp_path,
+    full_turn_offset,
+):
+    config = _certified_robot_config(tmp_path)
+    robot = FakeRobot()
+    current_joints = list(SO100_PLUS_JOYCON_INITIAL_RADIANS)
+    current_joints[5] += full_turn_offset
+    kinematics = FakeKinematics(
+        current_tcp_position_m=(0.35, 0.0, 0.22),
+        current_joint_radians=tuple(current_joints),
+    )
+    adapters: list[FakeSO100PlusAdapter] = []
+
+    def adapter_factory(*args, **kwargs):
+        adapter = FakeSO100PlusAdapter(*args, **kwargs)
+        adapters.append(adapter)
+        return adapter
+
+    runtime = build_so100_plus_runtime(
+        config,
+        risk_acknowledged=True,
+        robot_factory=lambda _config: robot,
+        kinematics_factory=lambda: kinematics,
+        adapter_factory=adapter_factory,
+        motion_limits_builder=lambda _current_joints: object(),
+    )
+
+    assert runtime.skills["move_arm"].enabled is False
+    assert runtime.move_arm_disabled_reason is not None
+    assert "wrist_roll_joint" in runtime.move_arm_disabled_reason
+    assert "360.000°" in runtime.move_arm_disabled_reason
+    assert "move_to" not in adapters[1].calls
+
+    runtime.shutdown()
+
+
+def test_so100_plus_runtime_rejects_uncertified_port_before_factory(
+    tmp_path,
+):
+    certified_config = _certified_robot_config(tmp_path)
+    config = SO100PlusRobotConfig(
+        port="/dev/ttyACM0",
+        calibration_dir=certified_config.calibration_dir,
+        follower_name=certified_config.follower_name,
+    )
+    factory_called = False
+
+    def forbidden_factory(_config):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("端口不匹配时不应创建 Robot")
+
+    with pytest.raises(
+        SO100PlusConfigurationError,
+        match="/dev/lerobot_right",
+    ):
+        build_so100_plus_runtime(
+            config,
+            risk_acknowledged=True,
+            robot_factory=forbidden_factory,
+        )
+
+    assert factory_called is False
 
 
 def test_so100_plus_runtime_rejects_changed_calibration_before_factory(

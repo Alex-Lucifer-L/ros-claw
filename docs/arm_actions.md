@@ -65,7 +65,8 @@ right follower 的实际配置、坐标语义、安全限制和手动验证方�
 `SO100PlusRobotConfig` 根据显式的 `follower_name` 构造文件名；
 统一入口还把正式工作空间绑定到已认证 `right_follower.json` 的 SHA-256
 `ac7b9877020da10aa6f886347bedf6b105aaeaf01493b2a65830c628c35837de`；
-目录可以改变，但文件内容变化后不能继续套用该工作空间。
+认证端口固定为 `/dev/lerobot_right`。目录可以改变，但其他端口或文件
+内容变化后不能继续套用该工作空间。
 在导入 LeRobot 或连接串口之前，factory 会检查：
 
 - 串口存在且是字符设备；
@@ -471,8 +472,9 @@ adapter.stop()
 统一 JSON 入口遵循另一条明确约束：普通退出或 Ctrl+C 只执行
 `stop() → 最多等待后台动作 5 秒 → disconnect()`，不自动调用
 `disable_torque()`。即使 `stop()` 报错，也会继续等待 Controller；后台
-线程超时时保持当前连接，不主动断开，也不报告安全完成。是否收纳和卸力
-必须由操作者另行决定。
+线程超时时不会立即断开，也不报告安全完成；非 daemon 延后清理线程会
+继续以有界等待轮询，并在线程稍后结束后完成 `disconnect()`。是否收纳
+和卸力必须由操作者另行决定。
 
 ### 当前 `stop` 的系统限制
 
@@ -576,8 +578,11 @@ MotionLimits 和 right-follower Skills，把真实 Adapter 接入相同 Gateway
 与 ExecutionController。摄像头不参与这次装配。
 
 真机连接后，`runtime.py` 会用当前六关节位置计算启动 TCP，并同时检查
-六关节是否都位于 `SO100_PLUS_JOYCON_INITIAL_RADIANS` 的 `5°` 认证容差
-内。TCP 或关节姿态任一不符合时，只把运行时 Skill 注册表里的
+关节姿态是否满足原真机验收脚本
+`MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 采用的启动门槛。运行时直接使用
+`abs(actual - expected)`，不把 `expected ± 2π` 折叠为等价角。这个数值
+是验收采用的启动判定门槛，不表示六关节任意独立 `±5°` 组合都经过真机
+验证。TCP 或关节姿态任一不符合时，只把运行时 Skill 注册表里的
 `move_arm.enabled` 复制为 `False`，不会改写通用 Skill 定义、Safety
 Checker、运动学或 Adapter；夹爪和 `stop` 仍保持启用。Gateway 因而会在调用
 `SO100PlusAdapter.move_to()` 之前返回 `技能未启用: move_arm`。这用于

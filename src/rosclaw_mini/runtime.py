@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import math
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Any
 
 from rosclaw_mini.arm.base import ArmAdapter
@@ -54,6 +55,7 @@ DEFAULT_SHUTDOWN_WAIT_TIMEOUT_SECONDS = 5.0
 class SO100PlusWorkspaceCertification:
     """把正式工作空间绑定到已验收的 follower、校准和启动姿态。"""
 
+    port: Path
     follower_name: str
     calibration_filename: str
     calibration_sha256: str
@@ -63,6 +65,7 @@ class SO100PlusWorkspaceCertification:
 
 SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_CERTIFICATION = (
     SO100PlusWorkspaceCertification(
+        port=Path("/dev/lerobot_right"),
         follower_name="right",
         calibration_filename="right_follower.json",
         calibration_sha256=(
@@ -98,6 +101,21 @@ class ArmRuntime:
         DEFAULT_SHUTDOWN_WAIT_TIMEOUT_SECONDS
     )
     _is_shutdown: bool = field(default=False, init=False, repr=False)
+    _shutdown_lock: Lock = field(
+        default_factory=Lock,
+        init=False,
+        repr=False,
+    )
+    _deferred_cleanup_thread: Thread | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _deferred_cleanup_error: ArmRuntimeShutdownError | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -110,52 +128,103 @@ class ArmRuntime:
     def shutdown(self) -> None:
         """停止后限时等待后台动作；线程结束前绝不主动断开。"""
 
-        if self._is_shutdown:
+        with self._shutdown_lock:
+            if self._is_shutdown:
+                return
+            if (
+                self._deferred_cleanup_thread is not None
+                and self._deferred_cleanup_thread.is_alive()
+            ):
+                raise ArmRuntimeShutdownError(
+                    "后台动作仍在运行；延后 disconnect 已安排，尚未完成。"
+                )
+            if self._deferred_cleanup_error is not None:
+                raise self._deferred_cleanup_error
+
+            errors: list[str] = []
+            connected_at_start = self.adapter.is_connected
+
+            if not connected_at_start:
+                errors.append(
+                    "Adapter 在关闭开始前已经意外断开，无法确认 stop 已送达"
+                )
+            else:
+                try:
+                    self.adapter.stop()
+                except Exception as error:
+                    errors.append(f"stop 失败：{error}")
+
+            if self.controller.is_running():
+                try:
+                    self.controller.wait(
+                        timeout=self.shutdown_wait_timeout_seconds,
+                    )
+                except Exception as error:
+                    errors.append(f"等待后台 Controller 失败：{error}")
+
+            if self.controller.is_running():
+                self._start_deferred_cleanup()
+                details = "；".join(errors)
+                if details:
+                    details = f"；此前还发生：{details}"
+                raise ArmRuntimeShutdownError(
+                    "后台动作在 "
+                    f"{self.shutdown_wait_timeout_seconds:.3f} 秒内未结束；"
+                    "线程结束前未执行 disconnect，已安排结束后的延后 disconnect"
+                    f"{details}。"
+                )
+
+            if connected_at_start and not self.adapter.is_connected:
+                errors.append("Adapter 在关闭过程中意外断开")
+            elif self.adapter.is_connected:
+                try:
+                    self.adapter.disconnect()
+                except Exception as error:
+                    errors.append(f"disconnect 失败：{error}")
+
+            if not self.adapter.is_connected:
+                self._is_shutdown = True
+
+            if errors:
+                raise ArmRuntimeShutdownError("；".join(errors) + "。")
+
+    def _start_deferred_cleanup(self) -> None:
+        """安排后台动作结束后的最终断开；调用方必须持有关闭锁。"""
+
+        if (
+            self._deferred_cleanup_thread is not None
+            and self._deferred_cleanup_thread.is_alive()
+        ):
             return
+        cleanup_thread = Thread(
+            target=self._disconnect_after_controller_stops,
+            name="rosclaw-arm-runtime-cleanup",
+            daemon=False,
+        )
+        self._deferred_cleanup_thread = cleanup_thread
+        cleanup_thread.start()
 
-        errors: list[str] = []
-        connected_at_start = self.adapter.is_connected
+    def _disconnect_after_controller_stops(self) -> None:
+        """以有界等待轮询 Controller，结束后完成最终 disconnect。"""
 
-        if not connected_at_start:
-            errors.append("Adapter 在关闭开始前已经意外断开，无法确认 stop 已送达")
-        else:
-            try:
-                self.adapter.stop()
-            except Exception as error:
-                errors.append(f"stop 失败：{error}")
-
-        if self.controller.is_running():
-            try:
+        try:
+            while self.controller.is_running():
                 self.controller.wait(
                     timeout=self.shutdown_wait_timeout_seconds,
                 )
-            except Exception as error:
-                errors.append(f"等待后台 Controller 失败：{error}")
 
-        if self.controller.is_running():
-            details = "；".join(errors)
-            if details:
-                details = f"；此前还发生：{details}"
-            raise ArmRuntimeShutdownError(
-                "后台动作在 "
-                f"{self.shutdown_wait_timeout_seconds:.3f} 秒内未结束；"
-                "为避免线程仍使用硬件，保持 Adapter 当前连接状态，未执行 disconnect"
-                f"{details}。"
-            )
-
-        if connected_at_start and not self.adapter.is_connected:
-            errors.append("Adapter 在关闭过程中意外断开")
-        elif self.adapter.is_connected:
-            try:
-                self.adapter.disconnect()
-            except Exception as error:
-                errors.append(f"disconnect 失败：{error}")
-
-        if not self.adapter.is_connected:
-            self._is_shutdown = True
-
-        if errors:
-            raise ArmRuntimeShutdownError("；".join(errors) + "。")
+            with self._shutdown_lock:
+                if self._is_shutdown:
+                    return
+                if self.adapter.is_connected:
+                    self.adapter.disconnect()
+                if not self.adapter.is_connected:
+                    self._is_shutdown = True
+        except Exception as error:
+            with self._shutdown_lock:
+                self._deferred_cleanup_error = ArmRuntimeShutdownError(
+                    f"延后 disconnect 失败：{error}。"
+                )
 
 
 def _sha256_file(path: Path) -> str:
@@ -177,6 +246,11 @@ def _validate_so100_plus_workspace_certification(
 ) -> None:
     """在创建 Robot 前确认正式工作空间所绑定的校准文件。"""
 
+    if Path(robot_config.port) != certification.port:
+        raise SO100PlusConfigurationError(
+            "正式工作空间和校准认证只允许端口 "
+            f"{str(certification.port)!r}。"
+        )
     if robot_config.follower_name != certification.follower_name:
         raise SO100PlusConfigurationError(
             "正式工作空间只认证给 follower "
@@ -310,7 +384,7 @@ def _apply_so100_plus_startup_certification_gate(
 
     try:
         joint_errors_degrees = tuple(
-            abs(math.degrees(math.remainder(actual - expected, 2 * math.pi)))
+            abs(math.degrees(actual - expected))
             for actual, expected in zip(
                 current_joint_radians,
                 certification.startup_joint_radians,

@@ -133,11 +133,11 @@ PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
   --acknowledge-so100-plus-risk
 ```
 
-真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认，或校准文件 SHA-256 与已认证的 `right_follower.json` 不一致时，程序会在创建 Robot 和访问串口之前拒绝启动。
+真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认、端口不是 `/dev/lerobot_right`，或校准文件 SHA-256 与已认证的 `right_follower.json` 不一致时，程序会在创建 Robot 和访问串口之前拒绝启动。
 
 连接后，入口会读取六个手臂关节并用 FK 打印当前 TCP。只有启动 TCP
-位于 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 内，并且六关节均在
-`SO100_PLUS_JOYCON_INITIAL_RADIANS` 的 `5°` 认证容差内时，JSON
+位于 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 内，并且关节姿态满足
+原真机验收脚本 `MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 采用的启动门槛时，JSON
 `move_arm` 才保持启用。TCP 或关节姿态任一不符合时，运行时会失败关闭
 `move_arm` 并打印原因。此时 `stop`、
 `open_gripper` 和 `close_gripper` 仍可使用。当前统一入口不会猜测或自动
@@ -153,8 +153,9 @@ stop()
 ```
 
 即使 `stop()` 报错，运行时仍会限时等待后台 Controller。线程超时时不会
-调用 `disconnect()`，也不会报告安全完成。普通退出不会调用
-`disable_torque()`。
+立即调用 `disconnect()`，也不会报告安全完成；非 daemon 延后清理线程会
+继续使用有界等待，工作线程稍后结束后再完成 `disconnect()`。普通退出
+不会调用 `disable_torque()`。
 
 ### 运行测试
 
@@ -165,7 +166,7 @@ python -m pytest -q
 当前仓库验证结果：
 
 ```text
-262 passed
+265 passed
 ```
 
 默认测试全部使用 Mock、FakeRobot、FakeBus 或 FakeCamera，不打开真实串口和视频设备。
@@ -375,8 +376,9 @@ open_gripper()
 统一真机入口在通用 Factory 检查之前还会执行正式工作空间绑定：读取
 `right_follower.json` 的原始字节并核对 SHA-256
 `ac7b9877020da10aa6f886347bedf6b105aaeaf01493b2a65830c628c35837de`。
-目录可以改变，但内容必须与已认证文件完全一致；任何内容变化都不能与
-当前正式工作空间组合使用。
+该认证还固定要求端口 `/dev/lerobot_right`。目录可以改变，但内容必须与
+已认证文件完全一致；其他端口或任何内容变化都不能与当前正式工作空间
+组合使用。
 
 仓库同时提供 `create_so100_plus_readonly_robot()`。它可以加载现有校准并读取电机，不写力矩、PID 或目标位置，适合预检；它与正式 `SO100PlusAdapter.connect()` 的行为不同。
 
@@ -493,10 +495,15 @@ SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
 所以这里的“正式”含义是：项目允许把该长方体作为当前工位的可达目标范围；它不表示范围内每一点都保证 `12 mm` 定位精度。
 
 统一真机入口把工作空间和认证启动关节姿态共同作为启动门禁。只有当前
-TCP 在范围内，并且六关节均位于 JoyCon 初始工作姿态的 `5°` 容差内，
+TCP 在范围内，并且关节姿态满足真机验收采用的 `5°` 启动门槛，
 `move_arm` 才启用。任一条件失败时，即使目标点本身位于长方体内，命令
 也不会到达 Adapter。这个门禁只约束统一 JSON 链路；直接调用 Adapter
 的本地维护代码仍由调用者承担前置姿态检查责任。
+
+这里的 `5°` 来自原验收脚本 `MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0`。
+运行时直接比较每个真实关节角的 `abs(actual - expected)`，不进行 `2π`
+周期折叠；它描述的是验收时采用的启动判定门槛，不表示六关节任意独立
+`±5°` 组合都已经过真机验证。
 
 适用条件必须同时满足：
 
