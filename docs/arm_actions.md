@@ -63,6 +63,9 @@ right follower 的实际配置、坐标语义、安全限制和手动验证方�
 
 代码不随机选择 `main_follower.json` 或 `right_follower.json`。
 `SO100PlusRobotConfig` 根据显式的 `follower_name` 构造文件名；
+统一入口还把正式工作空间绑定到已认证 `right_follower.json` 的 SHA-256
+`ac7b9877020da10aa6f886347bedf6b105aaeaf01493b2a65830c628c35837de`；
+目录可以改变，但文件内容变化后不能继续套用该工作空间。
 在导入 LeRobot 或连接串口之前，factory 会检查：
 
 - 串口存在且是字符设备；
@@ -466,8 +469,10 @@ adapter.stop()
 `disconnect()` 当成关力矩，软件也不替代物理断电。
 
 统一 JSON 入口遵循另一条明确约束：普通退出或 Ctrl+C 只执行
-`stop() → 等待后台动作结束 → disconnect()`，不自动调用
-`disable_torque()`。是否收纳和卸力必须由操作者另行决定。
+`stop() → 最多等待后台动作 5 秒 → disconnect()`，不自动调用
+`disable_torque()`。即使 `stop()` 报错，也会继续等待 Controller；后台
+线程超时时保持当前连接，不主动断开，也不报告安全完成。是否收纳和卸力
+必须由操作者另行决定。
 
 ### 当前 `stop` 的系统限制
 
@@ -570,10 +575,11 @@ adapter.disconnect_cameras()
 MotionLimits 和 right-follower Skills，把真实 Adapter 接入相同 Gateway
 与 ExecutionController。摄像头不参与这次装配。
 
-真机连接后，`runtime.py` 会用当前六关节位置计算启动 TCP。启动 TCP
-在正式工作空间外时，只把运行时 Skill 注册表里的 `move_arm.enabled`
-复制为 `False`，不会改写通用 Skill 定义、Safety Checker、运动学或
-Adapter；夹爪和 `stop` 仍保持启用。Gateway 因而会在调用
+真机连接后，`runtime.py` 会用当前六关节位置计算启动 TCP，并同时检查
+六关节是否都位于 `SO100_PLUS_JOYCON_INITIAL_RADIANS` 的 `5°` 认证容差
+内。TCP 或关节姿态任一不符合时，只把运行时 Skill 注册表里的
+`move_arm.enabled` 复制为 `False`，不会改写通用 Skill 定义、Safety
+Checker、运动学或 Adapter；夹爪和 `stop` 仍保持启用。Gateway 因而会在调用
 `SO100PlusAdapter.move_to()` 之前返回 `技能未启用: move_arm`。这用于
 防止机械臂仍在 `follower_rest` 时直接求解工作区目标；当前没有把未经
 统一入口验收的收纳展开轨迹伪装成普通 `move_arm`。门禁不会在同一进程

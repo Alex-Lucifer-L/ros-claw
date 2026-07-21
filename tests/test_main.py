@@ -8,17 +8,20 @@ from rosclaw_mini.main import (
     run_json_command_loop,
 )
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
-from rosclaw_mini.runtime import build_mock_runtime
+from rosclaw_mini.runtime import ArmRuntimeShutdownError, build_mock_runtime
 
 
 class FakeRuntime:
     def __init__(self) -> None:
         self.shutdown_calls = 0
+        self.shutdown_error = None
         self.current_tcp_position_m = None
         self.move_arm_disabled_reason = None
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
 
 
 def test_runtime_from_default_arguments_builds_mock_without_devices():
@@ -169,6 +172,24 @@ def test_main_shuts_down_after_ctrl_c():
     assert any("Ctrl+C" in message for message in outputs)
 
 
+def test_main_does_not_report_safe_completion_when_shutdown_fails():
+    runtime = FakeRuntime()
+    runtime.shutdown_error = ArmRuntimeShutdownError("后台线程超时，未断开")
+    outputs: list[str] = []
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: "exit",
+        output_func=outputs.append,
+        runtime_builder=lambda _args: runtime,
+    )
+
+    assert exit_code == 1
+    assert runtime.shutdown_calls == 1
+    assert any("停止或断开失败" in message for message in outputs)
+    assert not any("机械臂已停止" in message for message in outputs)
+
+
 def test_main_reports_startup_tcp_and_disabled_move_arm_reason():
     runtime = FakeRuntime()
     runtime.current_tcp_position_m = (0.208819920, -0.021115885, 0.002416365)
@@ -211,5 +232,51 @@ def test_json_loop_runs_existing_gateway_skill_chain_with_mock():
     assert result is not None
     assert result.success is True
     assert runtime.adapter.gripper_is_open is True
+
+    runtime.shutdown()
+
+
+def test_json_loop_stop_interrupts_running_move_through_request_stop():
+    runtime = build_mock_runtime(move_duration_seconds=2.0)
+    outputs: list[str] = []
+    stop_commands = []
+    original_request_stop = runtime.controller.request_stop
+    input_count = 0
+
+    def recording_request_stop(command):
+        stop_commands.append(command)
+        return original_request_stop(command)
+
+    runtime.controller.request_stop = recording_request_stop
+
+    def input_command(_prompt):
+        nonlocal input_count
+        input_count += 1
+        if input_count == 1:
+            return (
+                '{"skill_name": "move_arm", '
+                '"params": {"x": 0.5, "y": 0.4, "z": 0.3}}'
+            )
+        if input_count == 2:
+            assert runtime.adapter.wait_until_moving(timeout=0.5) is True
+            return '{"skill_name": "stop", "params": {}}'
+        return "exit"
+
+    run_json_command_loop(
+        runtime,
+        input_func=input_command,
+        output_func=outputs.append,
+    )
+    move_result = runtime.controller.wait(timeout=0.5)
+
+    assert len(stop_commands) == 1
+    assert stop_commands[0].skill_name == "stop"
+    assert move_result is not None
+    assert move_result.success is False
+    assert move_result.skill_name == "move_arm"
+    assert "停止" in move_result.message
+    assert runtime.adapter.position is None
+    assert runtime.adapter.is_stopped is True
+    assert any("停止命令执行结果" in message for message in outputs)
 
     runtime.shutdown()

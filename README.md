@@ -133,12 +133,13 @@ PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
   --acknowledge-so100-plus-risk
 ```
 
-真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认时，程序会在创建 Robot 和访问串口之前拒绝启动。
+真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认，或校准文件 SHA-256 与已认证的 `right_follower.json` 不一致时，程序会在创建 Robot 和访问串口之前拒绝启动。
 
 连接后，入口会读取六个手臂关节并用 FK 打印当前 TCP。只有启动 TCP
-已经位于 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 内时，JSON
-`move_arm` 才保持启用；如果机械臂仍处于 `follower_rest` 等正式工作区外
-姿态，运行时会失败关闭 `move_arm` 并打印原因。此时 `stop`、
+位于 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 内，并且六关节均在
+`SO100_PLUS_JOYCON_INITIAL_RADIANS` 的 `5°` 认证容差内时，JSON
+`move_arm` 才保持启用。TCP 或关节姿态任一不符合时，运行时会失败关闭
+`move_arm` 并打印原因。此时 `stop`、
 `open_gripper` 和 `close_gripper` 仍可使用。当前统一入口不会猜测或自动
 执行 `follower_rest → JoyCon 初始工作姿态` 的展开轨迹；使用已单独
 验收的流程进入工作区后，需要重新启动统一入口，启动门禁才会重新判断。
@@ -147,11 +148,13 @@ PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
 
 ```text
 stop()
-→ 等待后台动作结束
+→ 最多等待后台动作 5 秒
 → disconnect()
 ```
 
-普通退出不会调用 `disable_torque()`。
+即使 `stop()` 报错，运行时仍会限时等待后台 Controller。线程超时时不会
+调用 `disconnect()`，也不会报告安全完成。普通退出不会调用
+`disable_torque()`。
 
 ### 运行测试
 
@@ -162,7 +165,7 @@ python -m pytest -q
 当前仓库验证结果：
 
 ```text
-255 passed
+262 passed
 ```
 
 默认测试全部使用 Mock、FakeRobot、FakeBus 或 FakeCamera，不打开真实串口和视频设备。
@@ -369,6 +372,12 @@ open_gripper()
 
 缺少校准或内容不匹配时会立即失败，避免 LeRobot 自动进入重新校准。
 
+统一真机入口在通用 Factory 检查之前还会执行正式工作空间绑定：读取
+`right_follower.json` 的原始字节并核对 SHA-256
+`ac7b9877020da10aa6f886347bedf6b105aaeaf01493b2a65830c628c35837de`。
+目录可以改变，但内容必须与已认证文件完全一致；任何内容变化都不能与
+当前正式工作空间组合使用。
+
 仓库同时提供 `create_so100_plus_readonly_robot()`。它可以加载现有校准并读取电机，不写力矩、PID 或目标位置，适合预检；它与正式 `SO100PlusAdapter.connect()` 的行为不同。
 
 ### 正式连接会做什么
@@ -483,10 +492,11 @@ SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
 
 所以这里的“正式”含义是：项目允许把该长方体作为当前工位的可达目标范围；它不表示范围内每一点都保证 `12 mm` 定位精度。
 
-统一真机入口还把这个范围作为启动门禁：当前 TCP 在范围外时，
-`move_arm` 的 Skill 会被禁用，因此即使提交的目标点本身位于长方体内，
-命令也不会到达 Adapter。这个门禁只约束统一 JSON 链路；直接调用
-Adapter 的本地维护代码仍由调用者承担前置姿态检查责任。
+统一真机入口把工作空间和认证启动关节姿态共同作为启动门禁。只有当前
+TCP 在范围内，并且六关节均位于 JoyCon 初始工作姿态的 `5°` 容差内，
+`move_arm` 才启用。任一条件失败时，即使目标点本身位于长方体内，命令
+也不会到达 Adapter。这个门禁只约束统一 JSON 链路；直接调用 Adapter
+的本地维护代码仍由调用者承担前置姿态检查责任。
 
 适用条件必须同时满足：
 
@@ -710,7 +720,9 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 - Adapter 连接、运动、夹爪、停止和卸力；
 - 30 Hz 流式轨迹、跟踪误差、负载、温度和最终到位保护；
 - 摄像头 Factory、独立生命周期和图像形状；
-- 真机启动 TCP 门禁，以及工作区外 `move_arm` 不会调用 Adapter；
+- 校准 SHA-256 绑定、启动 TCP 与认证关节姿态门禁；
+- 关闭时 stop 异常、线程超时、意外断开的处理；
+- JSON 输入循环通过 `request_stop()` 中断后台动作；
 - 仿真工作空间扫描器与真机脚本参数保护。
 
 默认测试不会：
@@ -860,8 +872,8 @@ rosclaw-mini/
 
 - 真机入口仍要求操作者在场并显式确认风险，不适合无人值守；
 - 统一入口尚未实现经过验证的 `follower_rest → 工作区` 自动展开流程；
-  启动 TCP 在正式范围外时会保留连接，但禁用 `move_arm`；
-- 启动门禁检查 TCP 位置，不等于验证完整末端姿态、环境障碍物或人员；
+  启动 TCP 或认证关节姿态不符合时会保留连接，但禁用 `move_arm`；
+- 启动门禁不能识别环境障碍物或人员；
 - 正式工作空间只覆盖当前固定姿态邻域，不是任意姿态的全局空间；
 - 除底座外，其余关节没有逐一完成当前安装条件下的物理边界认证；
 - `move_to()` 不能显式指定 roll、pitch、yaw；

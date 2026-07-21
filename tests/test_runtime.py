@@ -1,16 +1,21 @@
+import math
+from pathlib import Path
 from threading import Event
 
 import pytest
 
 from rosclaw_mini.arm.base import ArmAdapter
+from rosclaw_mini.arm.kinematics import SO100_PLUS_JOYCON_INITIAL_RADIANS
 from rosclaw_mini.arm.so100_plus_factory import (
     SO100_PLUS_MOTOR_NAMES,
+    SO100PlusConfigurationError,
     SO100PlusRobotConfig,
 )
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.execution.controller import ExecutionController
 from rosclaw_mini.runtime import (
     ArmRuntime,
+    ArmRuntimeShutdownError,
     build_mock_runtime,
     build_so100_plus_runtime,
 )
@@ -20,10 +25,18 @@ from rosclaw_mini.skills.arm_skills import (
 
 
 class RecordingAdapter(ArmAdapter):
-    def __init__(self, *, stop_event: Event | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        stop_event: Event | None = None,
+        stop_error: Exception | None = None,
+        disconnect_on_stop: bool = False,
+    ) -> None:
         self.connected = True
         self.calls: list[str] = []
         self.stop_event = stop_event
+        self.stop_error = stop_error
+        self.disconnect_on_stop = disconnect_on_stop
 
     @property
     def is_connected(self) -> bool:
@@ -50,6 +63,10 @@ class RecordingAdapter(ArmAdapter):
         self.calls.append("stop")
         if self.stop_event is not None:
             self.stop_event.set()
+        if self.disconnect_on_stop:
+            self.connected = False
+        if self.stop_error is not None:
+            raise self.stop_error
 
     def disable_torque(self, *, emergency: bool = False) -> None:
         self.calls.append("disable_torque")
@@ -61,6 +78,26 @@ def _successful_result(command: Command) -> ExecutionResult:
         skill_name=command.skill_name,
         success=True,
         message="完成",
+    )
+
+
+def _certified_robot_config(tmp_path: Path) -> SO100PlusRobotConfig:
+    repository_root = Path(__file__).resolve().parents[1]
+    source = (
+        repository_root
+        / "lerobot-joycon_plus"
+        / ".cache"
+        / "calibration"
+        / "so100_plus"
+        / "right_follower.json"
+    )
+    calibration_dir = tmp_path / "calibration"
+    calibration_dir.mkdir()
+    (calibration_dir / "right_follower.json").write_bytes(source.read_bytes())
+    return SO100PlusRobotConfig(
+        port="/path-not-accessed/robot",
+        calibration_dir=calibration_dir,
+        follower_name="right",
     )
 
 
@@ -107,6 +144,140 @@ def test_runtime_shutdown_stops_waits_and_disconnects_without_disabling_torque()
     # shutdown 可重复调用，但不会重复操作硬件。
     runtime.shutdown()
     assert adapter.calls == ["stop", "disconnect"]
+
+
+def test_runtime_shutdown_waits_and_disconnects_after_stop_raises():
+    stop_event = Event()
+    motion_started = Event()
+    allow_motion_finish = Event()
+    wait_timeouts: list[float | None] = []
+
+    def runner(command: Command) -> ExecutionResult:
+        motion_started.set()
+        stop_event.wait(timeout=1.0)
+        allow_motion_finish.wait(timeout=1.0)
+        return _successful_result(command)
+
+    adapter = RecordingAdapter(
+        stop_event=stop_event,
+        stop_error=RuntimeError("模拟 stop 写入失败"),
+    )
+    controller = ExecutionController(runner)
+    original_wait = controller.wait
+
+    def recording_wait(timeout=None):
+        wait_timeouts.append(timeout)
+        allow_motion_finish.set()
+        return original_wait(timeout=timeout)
+
+    controller.wait = recording_wait
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=controller,
+        shutdown_wait_timeout_seconds=0.5,
+    )
+    command = Command(
+        command_id="stop-error",
+        skill_name="move_arm",
+        params={"x": 0.1, "y": 0.2, "z": 0.3},
+        source="user",
+    )
+
+    assert controller.submit(command) is True
+    assert motion_started.wait(timeout=1.0) is True
+
+    with pytest.raises(ArmRuntimeShutdownError, match="stop 失败"):
+        runtime.shutdown()
+
+    assert controller.is_running() is False
+    assert wait_timeouts == [0.5]
+    assert adapter.calls == ["stop", "disconnect"]
+    assert adapter.is_connected is False
+    assert "disable_torque" not in adapter.calls
+
+
+def test_runtime_shutdown_timeout_keeps_adapter_connected_until_worker_finishes():
+    motion_started = Event()
+    allow_motion_finish = Event()
+
+    def runner(command: Command) -> ExecutionResult:
+        motion_started.set()
+        allow_motion_finish.wait(timeout=1.0)
+        return _successful_result(command)
+
+    adapter = RecordingAdapter()
+    controller = ExecutionController(runner)
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=controller,
+        shutdown_wait_timeout_seconds=0.01,
+    )
+    command = Command(
+        command_id="shutdown-timeout",
+        skill_name="move_arm",
+        params={"x": 0.1, "y": 0.2, "z": 0.3},
+        source="user",
+    )
+
+    assert controller.submit(command) is True
+    assert motion_started.wait(timeout=1.0) is True
+
+    with pytest.raises(ArmRuntimeShutdownError, match="未结束"):
+        runtime.shutdown()
+
+    assert controller.is_running() is True
+    assert adapter.is_connected is True
+    assert adapter.calls == ["stop"]
+    assert "disconnect" not in adapter.calls
+    assert "disable_torque" not in adapter.calls
+
+    allow_motion_finish.set()
+    assert controller.wait(timeout=1.0) is not None
+    runtime.shutdown()
+
+    assert adapter.calls == ["stop", "stop", "disconnect"]
+    assert adapter.is_connected is False
+
+
+def test_runtime_shutdown_reports_adapter_disconnect_during_stop():
+    stop_event = Event()
+    motion_started = Event()
+
+    def runner(command: Command) -> ExecutionResult:
+        motion_started.set()
+        stop_event.wait(timeout=1.0)
+        return _successful_result(command)
+
+    adapter = RecordingAdapter(
+        stop_event=stop_event,
+        disconnect_on_stop=True,
+    )
+    controller = ExecutionController(runner)
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=controller,
+        shutdown_wait_timeout_seconds=0.5,
+    )
+    command = Command(
+        command_id="unexpected-disconnect",
+        skill_name="move_arm",
+        params={"x": 0.1, "y": 0.2, "z": 0.3},
+        source="user",
+    )
+
+    assert controller.submit(command) is True
+    assert motion_started.wait(timeout=1.0) is True
+
+    with pytest.raises(ArmRuntimeShutdownError, match="意外断开"):
+        runtime.shutdown()
+
+    assert controller.is_running() is False
+    assert adapter.is_connected is False
+    assert adapter.calls == ["stop"]
+    assert "disable_torque" not in adapter.calls
 
 
 def test_so100_plus_runtime_requires_risk_ack_before_factory_call():
@@ -182,15 +353,19 @@ class FakeKinematics:
             0.0,
             0.22,
         ),
+        current_joint_radians: tuple[float, ...] = (
+            SO100_PLUS_JOYCON_INITIAL_RADIANS
+        ),
     ) -> None:
         self.driver_inputs: list[tuple[float, ...]] = []
         self.forward_inputs: list[tuple[float, ...]] = []
         self.current_tcp_position_m = current_tcp_position_m
+        self.current_joint_radians = current_joint_radians
 
     def driver_degrees_to_model_radians(self, values):
         values = tuple(values)
         self.driver_inputs.append(values)
-        return tuple(value / 100.0 for value in values)
+        return self.current_joint_radians
 
     def forward_position(self, values):
         values = tuple(values)
@@ -219,12 +394,10 @@ class FakeSO100PlusAdapter(RecordingAdapter):
         self.robot.is_connected = False
 
 
-def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills():
-    config = SO100PlusRobotConfig(
-        port="/path-not-accessed/robot",
-        calibration_dir="/path-not-accessed/calibration",
-        follower_name="right",
-    )
+def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
+    tmp_path,
+):
+    config = _certified_robot_config(tmp_path)
     robot = FakeRobot()
     kinematics = FakeKinematics()
     adapters: list[FakeSO100PlusAdapter] = []
@@ -274,9 +447,9 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills():
         (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)
     ]
     assert kinematics.forward_inputs == [
-        (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+        SO100_PLUS_JOYCON_INITIAL_RADIANS
     ]
-    assert motion_inputs == [(0.1, 0.2, 0.3, 0.4, 0.5, 0.6)]
+    assert motion_inputs == [SO100_PLUS_JOYCON_INITIAL_RADIANS]
     assert adapters[1].kwargs["kinematics"] is kinematics
     assert adapters[1].kwargs["motion_limits"] is motion_limits
     assert adapters[1].kwargs["motion_config"] is not None
@@ -287,12 +460,10 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills():
     assert adapters[1].calls == ["stop", "disconnect"]
 
 
-def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_workspace():
-    config = SO100PlusRobotConfig(
-        port="/path-not-accessed/robot",
-        calibration_dir="/path-not-accessed/calibration",
-        follower_name="right",
-    )
+def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_workspace(
+    tmp_path,
+):
+    config = _certified_robot_config(tmp_path)
     robot = FakeRobot()
     kinematics = FakeKinematics(
         current_tcp_position_m=(
@@ -350,12 +521,85 @@ def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_worksp
     assert adapters[1].calls == ["stop", "disconnect"]
 
 
-def test_so100_plus_runtime_cleans_up_if_post_connect_assembly_fails():
-    config = SO100PlusRobotConfig(
-        port="/path-not-accessed/robot",
-        calibration_dir="/path-not-accessed/calibration",
-        follower_name="right",
+def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertified(
+    tmp_path,
+):
+    config = _certified_robot_config(tmp_path)
+    robot = FakeRobot()
+    current_joints = list(SO100_PLUS_JOYCON_INITIAL_RADIANS)
+    current_joints[2] += math.radians(6.0)
+    kinematics = FakeKinematics(
+        current_tcp_position_m=(0.35, 0.0, 0.22),
+        current_joint_radians=tuple(current_joints),
     )
+    adapters: list[FakeSO100PlusAdapter] = []
+
+    def adapter_factory(*args, **kwargs):
+        adapter = FakeSO100PlusAdapter(*args, **kwargs)
+        adapters.append(adapter)
+        return adapter
+
+    runtime = build_so100_plus_runtime(
+        config,
+        risk_acknowledged=True,
+        robot_factory=lambda _config: robot,
+        kinematics_factory=lambda: kinematics,
+        adapter_factory=adapter_factory,
+        motion_limits_builder=lambda _current_joints: object(),
+    )
+
+    assert runtime.skills["move_arm"].enabled is False
+    assert runtime.move_arm_disabled_reason is not None
+    assert "启动关节姿态不在已认证范围内" in (
+        runtime.move_arm_disabled_reason
+    )
+    assert "ellbow_joint" in runtime.move_arm_disabled_reason
+
+    command = Command(
+        command_id="uncertified-pose",
+        skill_name="move_arm",
+        params={"x": 0.35, "y": 0.0, "z": 0.22},
+        source="user",
+    )
+    assert runtime.controller.submit(command) is True
+    result = runtime.controller.wait(timeout=1.0)
+
+    assert result is not None
+    assert result.success is False
+    assert result.message == "技能未启用: move_arm"
+    assert "move_to" not in adapters[1].calls
+
+    runtime.shutdown()
+
+
+def test_so100_plus_runtime_rejects_changed_calibration_before_factory(
+    tmp_path,
+):
+    config = _certified_robot_config(tmp_path)
+    config.calibration_path.write_bytes(
+        config.calibration_path.read_bytes() + b"\n"
+    )
+    factory_called = False
+
+    def forbidden_factory(_config):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("校准指纹不匹配时不应创建 Robot")
+
+    with pytest.raises(SO100PlusConfigurationError, match="认证指纹不一致"):
+        build_so100_plus_runtime(
+            config,
+            risk_acknowledged=True,
+            robot_factory=forbidden_factory,
+        )
+
+    assert factory_called is False
+
+
+def test_so100_plus_runtime_cleans_up_if_post_connect_assembly_fails(
+    tmp_path,
+):
+    config = _certified_robot_config(tmp_path)
     robot = FakeRobot()
     adapters: list[FakeSO100PlusAdapter] = []
 

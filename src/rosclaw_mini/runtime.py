@@ -2,11 +2,16 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+import hashlib
+import math
 from pathlib import Path
 from typing import Any
 
 from rosclaw_mini.arm.base import ArmAdapter
-from rosclaw_mini.arm.kinematics import SO100PlusKinematics
+from rosclaw_mini.arm.kinematics import (
+    SO100_PLUS_JOYCON_INITIAL_RADIANS,
+    SO100PlusKinematics,
+)
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.arm.so100_plus import (
     SO100PlusAdapter,
@@ -14,6 +19,7 @@ from rosclaw_mini.arm.so100_plus import (
     SO100PlusMotionConfig,
 )
 from rosclaw_mini.arm.so100_plus_factory import (
+    SO100PlusConfigurationError,
     SO100PlusRobotConfig,
     create_so100_plus_robot,
 )
@@ -41,6 +47,31 @@ DEFAULT_SO100_PLUS_CALIBRATION_DIR = Path(
 DEFAULT_SO100_PLUS_FOLLOWER_NAME = "right"
 DEFAULT_SO100_PLUS_GRIPPER_OPEN_DEGREES = 60.0
 DEFAULT_SO100_PLUS_GRIPPER_CLOSE_DEGREES = -5.0
+DEFAULT_SHUTDOWN_WAIT_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class SO100PlusWorkspaceCertification:
+    """把正式工作空间绑定到已验收的 follower、校准和启动姿态。"""
+
+    follower_name: str
+    calibration_filename: str
+    calibration_sha256: str
+    startup_joint_radians: tuple[float, ...]
+    startup_joint_tolerance_degrees: float
+
+
+SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_CERTIFICATION = (
+    SO100PlusWorkspaceCertification(
+        follower_name="right",
+        calibration_filename="right_follower.json",
+        calibration_sha256=(
+            "ac7b9877020da10aa6f886347bedf6b105aaeaf01493b2a65830c628c35837de"
+        ),
+        startup_joint_radians=SO100_PLUS_JOYCON_INITIAL_RADIANS,
+        startup_joint_tolerance_degrees=5.0,
+    )
+)
 
 # 这里只属于 Mock 演示，不代表任何真实机械臂的物理工作空间。
 DEFAULT_MOCK_WORKSPACE = WorkspaceLimits(
@@ -48,6 +79,10 @@ DEFAULT_MOCK_WORKSPACE = WorkspaceLimits(
     y=AxisLimits(-1.0, 1.0),
     z=AxisLimits(-1.0, 1.0),
 )
+
+
+class ArmRuntimeShutdownError(RuntimeError):
+    """运行时无法确认后台动作已结束并安全断开。"""
 
 
 @dataclass
@@ -59,25 +94,112 @@ class ArmRuntime:
     controller: ExecutionController
     current_tcp_position_m: tuple[float, float, float] | None = None
     move_arm_disabled_reason: str | None = None
+    shutdown_wait_timeout_seconds: float = (
+        DEFAULT_SHUTDOWN_WAIT_TIMEOUT_SECONDS
+    )
     _is_shutdown: bool = field(default=False, init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.shutdown_wait_timeout_seconds, bool)
+            or not math.isfinite(self.shutdown_wait_timeout_seconds)
+            or self.shutdown_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("关闭等待超时必须是有限正数。")
+
     def shutdown(self) -> None:
-        """先停止并等待后台动作结束，再断开；不会自动关闭力矩。"""
+        """停止后限时等待后台动作；线程结束前绝不主动断开。"""
 
         if self._is_shutdown:
             return
 
-        try:
-            if self.adapter.is_connected:
-                self.adapter.stop()
-                if self.controller.is_running():
-                    self.controller.wait()
-        finally:
+        errors: list[str] = []
+        connected_at_start = self.adapter.is_connected
+
+        if not connected_at_start:
+            errors.append("Adapter 在关闭开始前已经意外断开，无法确认 stop 已送达")
+        else:
             try:
-                if self.adapter.is_connected:
-                    self.adapter.disconnect()
-            finally:
-                self._is_shutdown = True
+                self.adapter.stop()
+            except Exception as error:
+                errors.append(f"stop 失败：{error}")
+
+        if self.controller.is_running():
+            try:
+                self.controller.wait(
+                    timeout=self.shutdown_wait_timeout_seconds,
+                )
+            except Exception as error:
+                errors.append(f"等待后台 Controller 失败：{error}")
+
+        if self.controller.is_running():
+            details = "；".join(errors)
+            if details:
+                details = f"；此前还发生：{details}"
+            raise ArmRuntimeShutdownError(
+                "后台动作在 "
+                f"{self.shutdown_wait_timeout_seconds:.3f} 秒内未结束；"
+                "为避免线程仍使用硬件，保持 Adapter 当前连接状态，未执行 disconnect"
+                f"{details}。"
+            )
+
+        if connected_at_start and not self.adapter.is_connected:
+            errors.append("Adapter 在关闭过程中意外断开")
+        elif self.adapter.is_connected:
+            try:
+                self.adapter.disconnect()
+            except Exception as error:
+                errors.append(f"disconnect 失败：{error}")
+
+        if not self.adapter.is_connected:
+            self._is_shutdown = True
+
+        if errors:
+            raise ArmRuntimeShutdownError("；".join(errors) + "。")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as input_file:
+            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise SO100PlusConfigurationError(
+            f"无法读取已认证校准文件：{path}"
+        ) from error
+    return digest.hexdigest()
+
+
+def _validate_so100_plus_workspace_certification(
+    robot_config: SO100PlusRobotConfig,
+    certification: SO100PlusWorkspaceCertification,
+) -> None:
+    """在创建 Robot 前确认正式工作空间所绑定的校准文件。"""
+
+    if robot_config.follower_name != certification.follower_name:
+        raise SO100PlusConfigurationError(
+            "正式工作空间只认证给 follower "
+            f"{certification.follower_name!r}。"
+        )
+
+    calibration_path = robot_config.calibration_path
+    if calibration_path.name != certification.calibration_filename:
+        raise SO100PlusConfigurationError(
+            "正式工作空间要求校准文件 "
+            f"{certification.calibration_filename!r}。"
+        )
+    if not calibration_path.is_file():
+        raise SO100PlusConfigurationError(
+            f"已认证校准文件不存在：{calibration_path}。"
+        )
+
+    actual_sha256 = _sha256_file(calibration_path)
+    if actual_sha256 != certification.calibration_sha256:
+        raise SO100PlusConfigurationError(
+            "校准文件与正式工作空间认证指纹不一致；"
+            f"期望 {certification.calibration_sha256}，实际 {actual_sha256}。"
+        )
 
 
 def _build_controller(
@@ -160,32 +282,64 @@ def _cleanup_connected_adapter(adapter: ArmAdapter) -> None:
             adapter.disconnect()
 
 
-def _apply_so100_plus_startup_workspace_gate(
+def _apply_so100_plus_startup_certification_gate(
     skills: dict[str, SkillDefinition],
     current_tcp_position_m: tuple[float, float, float],
+    current_joint_radians: tuple[float, ...],
+    certification: SO100PlusWorkspaceCertification,
 ) -> tuple[dict[str, SkillDefinition], str | None]:
-    """当前 TCP 不在正式工作空间时，只失败关闭 move_arm Skill。"""
+    """启动 TCP 或关节姿态不符合认证时，失败关闭 move_arm Skill。"""
 
     move_arm_skill = skills.get("move_arm")
     if move_arm_skill is None:
         raise RuntimeError("right_follower Skill 注册表缺少 move_arm。")
 
+    violations: list[str] = []
     try:
         SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS.validate_position(
             *current_tcp_position_m
         )
     except LimitViolationError as error:
+        position = ", ".join(
+            f"{value:.6f}" for value in current_tcp_position_m
+        )
+        violations.append(
+            f"启动 TCP ({position}) m 不在当前 right_follower "
+            f"正式工作空间内（{error}）"
+        )
+
+    try:
+        joint_errors_degrees = tuple(
+            abs(math.degrees(math.remainder(actual - expected, 2 * math.pi)))
+            for actual, expected in zip(
+                current_joint_radians,
+                certification.startup_joint_radians,
+                strict=True,
+            )
+        )
+    except ValueError as error:
+        raise RuntimeError("当前关节数与已认证启动姿态不一致。") from error
+
+    max_joint_error_degrees = max(joint_errors_degrees)
+    if max_joint_error_degrees > certification.startup_joint_tolerance_degrees:
+        max_error_index = joint_errors_degrees.index(max_joint_error_degrees)
+        violations.append(
+            "启动关节姿态不在已认证范围内："
+            f"{SO100_PLUS_ARM_JOINT_NAMES[max_error_index]} 偏差 "
+            f"{max_joint_error_degrees:.3f}°，超过 "
+            f"{certification.startup_joint_tolerance_degrees:.1f}°"
+        )
+
+    if violations:
         gated_skills = dict(skills)
         gated_skills["move_arm"] = replace(
             move_arm_skill,
             enabled=False,
         )
-        position = ", ".join(
-            f"{value:.6f}" for value in current_tcp_position_m
-        )
         reason = (
-            f"move_arm 已失败关闭：启动 TCP ({position}) m 不在当前 "
-            f"right_follower 正式工作空间内（{error}）。"
+            "move_arm 已失败关闭："
+            + "；".join(violations)
+            + "。"
             "请退出统一入口，使用经过验证的收纳展开流程进入工作区后重新启动；"
             "不要从 follower_rest 直接发送工作空间目标。"
         )
@@ -222,6 +376,12 @@ def build_so100_plus_runtime(
             "已拒绝套用到其他 follower。"
         )
 
+    certification = SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_CERTIFICATION
+    _validate_so100_plus_workspace_certification(
+        robot_config,
+        certification,
+    )
+
     robot = robot_factory(robot_config)
     kinematics = kinematics_factory()
     gripper_config = SO100PlusGripperConfig(
@@ -253,9 +413,11 @@ def build_so100_plus_runtime(
             motion_config=SO100PlusMotionConfig(),
         )
         skills, move_arm_disabled_reason = (
-            _apply_so100_plus_startup_workspace_gate(
+            _apply_so100_plus_startup_certification_gate(
                 skill_builder(active_adapter),
                 current_tcp_position_m,
+                current_joint_radians,
+                certification,
             )
         )
         return ArmRuntime(
