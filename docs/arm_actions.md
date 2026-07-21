@@ -3,9 +3,9 @@
 本文档记录当前已实现的机械臂命令链路、SO-100 Plus
 right follower 的实际配置、坐标语义、安全限制和手动验证方法。
 
-> 默认应用入口仍使用 `MockArmAdapter`。真机不会被 `pytest` 或
-> `main.py` 自动连接。所有真机脚本都需要传入设备、校准路径和
-> `--acknowledge-...-risk` 参数。
+> 默认应用入口仍使用 `MockArmAdapter`。`pytest` 和不带真机参数的
+> `main.py` 不会连接硬件；只有显式选择 `--backend so100_plus` 并传入
+> `--acknowledge-so100-plus-risk` 后，统一入口才会装配并连接真机。
 
 ## 1. 执行链路和职责
 
@@ -43,8 +43,9 @@ right follower 的实际配置、坐标语义、安全限制和手动验证方�
 - ArmHandlers 只组合 Adapter 原子动作，不导入 Feetech 驱动。
 - Adapter 不解析 `Command`，不生成 `ExecutionResult`，不实现 RAG/LLM。
 
-`main.py` 目前尚未提供 `mock/so100_plus` 后端选择参数。因此，
-本文后面的真机脚本是显式手动验证入口，不是新的默认业务入口。
+`main.py` 已提供 `mock/so100_plus` 后端选择，默认仍是 `mock`。
+本文后面的真机脚本保留为单项诊断和人工验证工具，不会被默认业务入口
+或单元测试自动调用。
 
 ## 2. 已确认的真机身份
 
@@ -449,7 +450,7 @@ P/I/D 是 EEPROM 寄存器。`SO100PlusAdapter.set_pid_gains()` 因此要求
 | `disable_torque()` | 验证 follower_rest 后写 `Torque_Enable = 0`，确认全部关闭，并保持 EEPROM 写锁 | 关闭 | 正常收纳后机械臂变软 |
 | `disconnect()` | 关闭 LeRobot/串口通信 | 不保证关闭 | 只表示无法继续发命令，不是停止或急停 |
 
-真机动作脚本的安全退出顺序应为：
+需要主动收纳并卸力的真机动作脚本，安全退出顺序应为：
 
 ```text
 adapter.stop()
@@ -464,30 +465,34 @@ adapter.stop()
 `torque_disabled_emergency` 遥测，并要求人员托住机械臂。不能把
 `disconnect()` 当成关力矩，软件也不替代物理断电。
 
+统一 JSON 入口遵循另一条明确约束：普通退出或 Ctrl+C 只执行
+`stop() → 等待后台动作结束 → disconnect()`，不自动调用
+`disable_torque()`。是否收纳和卸力必须由操作者另行决定。
+
 ### 当前 `stop` 的系统限制
 
 `SO100PlusAdapter.stop()` 已能设置停止事件、读取当前位置并把当前位置
 写回目标位置，因此 Adapter 层的取消能力已经存在。
 
-但是当前 `main.py` 和 `run_command()` 使用同步执行方式：
+当前 `main.py` 使用 `ExecutionController` 在后台执行普通命令：
 
 ```text
 读取 move_arm
-→ run_command() 等待 move_to() 完成
-→ 完成后才能读取下一条命令
+→ ExecutionController 在后台调用 run_command()
+→ 主输入循环继续接收 stop
+→ controller.request_stop()
+→ SO100PlusAdapter.stop()
 ```
 
-因此，在同一个命令行输入循环中，用户不能在 `move_to()` 执行期间再输入
-`stop` 来中断它。当前只有另一个线程或独立真机流程调用 `stop()` 时，
-才能中断正在执行的 Adapter 轨迹。
+因此，在同一个命令行输入循环中，可以在 `move_to()` 执行期间输入
+`stop` 来中断 Adapter 轨迹。一次仍只允许一个普通命令运行；新的普通
+命令必须等待前一个完成或先停止前一个。
 
 这表示：
 
 - Adapter 层停止能力：已实现；
-- 当前同步 Gateway 的运动中取消能力：尚未实现；
+- 命令行入口的运动中 stop：已接入；
 - `stop()` 不是独立硬件急停，也不能替代物理断电。
-
-后续需要通过执行线程、任务队列或 ROS 2 Action 的取消机制实现系统级中断。
 
 ## 9. 连接时会发生什么
 
@@ -560,9 +565,19 @@ adapter.disconnect_cameras()
 `disable_torque()` 仍供本地维护和受控关闭流程直接调用；默认禁用的是
 普通 Gateway/LLM Skill 入口，不是删除底层卸力能力。
 
-`main.py` 始终创建 `MockArmAdapter`，因此运行普通交互入口不会连接真机。
-真实 Adapter 已可传入 `build_arm_skills()`，但项目尚未实现一个面向终端用户的
-真机 Gateway 启动入口。
+`main.py` 默认创建 `MockArmAdapter`。显式选择 `--backend so100_plus`
+并确认风险时，`runtime.py` 会复用现有 Robot Factory、运动学、正式
+MotionLimits 和 right-follower Skills，把真实 Adapter 接入相同 Gateway
+与 ExecutionController。摄像头不参与这次装配。
+
+真机连接后，`runtime.py` 会用当前六关节位置计算启动 TCP。启动 TCP
+在正式工作空间外时，只把运行时 Skill 注册表里的 `move_arm.enabled`
+复制为 `False`，不会改写通用 Skill 定义、Safety Checker、运动学或
+Adapter；夹爪和 `stop` 仍保持启用。Gateway 因而会在调用
+`SO100PlusAdapter.move_to()` 之前返回 `技能未启用: move_arm`。这用于
+防止机械臂仍在 `follower_rest` 时直接求解工作区目标；当前没有把未经
+统一入口验收的收纳展开轨迹伪装成普通 `move_arm`。门禁不会在同一进程
+中自动解除；使用单独验收的流程进入工作区后，应重新启动统一入口。
 
 `build_so100_plus_right_follower_arm_skills(adapter)` 会把
 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 写入 `move_arm` 的
@@ -729,7 +744,10 @@ python scripts/tune_so100_plus_pid.py \
 - 初级教学版机械臂有回差、重力下垂和精度波动，当前 `12 mm` 是项目
   运行验收容差，不是厂商精度声明。
 - 真实摄像头已识别并完成软件接入，但尚未抓取单帧。
-- `main.py` 尚未提供真机 Gateway 启动方式，默认只能使用 Mock。
+- `main.py` 的真机连接、普通退出、Ctrl+C、`stop`、夹爪动作和不自动
+  卸力已经由操作者完成实机检查；从 `follower_rest` 启动时，当前 TCP
+  位于正式工作空间外，因此普通 `move_arm` 会失败关闭。尚未实现并验收
+  统一入口专用的安全展开/收纳转换动作；默认仍是 Mock。
 - 早期连接、夹爪和 stop 手动脚本会在退出时明确警告
   `disconnect()` 不是关力矩；正式 `move_to` 脚本已执行完整的关力矩清理。
 - 摄像头已经与机械臂生命周期解耦，但真实摄像头单帧仍未验证。
@@ -739,6 +757,7 @@ python scripts/tune_so100_plus_pid.py \
 | 作用 | 文件 |
 | --- | --- |
 | 统一 Adapter 接口 | `src/rosclaw_mini/arm/base.py` |
+| 应用 Adapter、Skills 和 Controller 装配 | `src/rosclaw_mini/runtime.py` |
 | SO-100 Plus 真实 Adapter | `src/rosclaw_mini/arm/so100_plus.py` |
 | 运动学和 TCP | `src/rosclaw_mini/arm/kinematics.py` |
 | 机器、校准和摄像头 factory | `src/rosclaw_mini/arm/so100_plus_factory.py` |

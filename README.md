@@ -1,326 +1,305 @@
 # RosClaw Mini
 
-RosClaw Mini 是一个面向机械臂控制场景的轻量级 Python 原型。项目的核心目标是：
-让上层命令先经过结构校验、技能查询和安全检查，再通过统一的机械臂接口执行，
-避免业务代码直接操作厂商驱动或电机寄存器。
+RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项目。它要解决的核心问题不是“怎样直接给电机发命令”，而是：
 
-当前仓库同时包含两条后端：
+> 怎样让一条上层命令先经过结构校验、技能查询和安全检查，再通过统一接口落到 Mock 或真实机械臂。
 
-- `MockArmAdapter`：默认后端，只修改内存状态，不连接真实硬件；
-- `SO100PlusAdapter`：已经接入 SO-100 Plus 单臂、Feetech 电机、
-  运动学、夹爪、运行遥测和 USB 摄像头。
+当前仓库已经完成默认 Mock 主链路，以及 SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护和可选摄像头接口。统一 JSON 入口支持显式选择 `mock` 或 `so100_plus`；默认仍是 Mock，真机还必须额外确认连接、上力和运动风险。
 
-> `main.py` 目前仍固定使用 Mock 后端。普通启动命令和默认 `pytest`
-> 不会自动连接、上力或移动真实机械臂。真机只能通过需要显式风险确认参数的
-> 手动脚本执行。本项目仍处于教学和原型阶段，不适用于无人值守或生产环境。
+> [!IMPORTANT]
+> 普通启动命令和默认 `pytest` 不会连接真实机械臂、启用力矩、修改校准或打开摄像头。`SO100PlusAdapter.connect()` 则不是只读操作：它会连接电机、同步目标、写入运行参数并启用力矩。执行任何真机脚本前，操作者必须在机械臂旁、清空路径，并能立即物理断电。
 
-## 目录
+## 阅读导航
 
-- [项目定位](#项目定位)
-- [当前完成状态](#当前完成状态)
-- [整体架构和思维导图](#整体架构和思维导图)
-- [一条命令如何执行](#一条命令如何执行)
-- [核心数据结构](#核心数据结构)
-- [内置 Skill](#内置-skill)
-- [ArmAdapter 统一硬件接口](#armadapter-统一硬件接口)
-- [Mock 后端](#mock-后端)
-- [SO-100 Plus 真机后端](#so-100-plus-真机后端)
-- [`move_to(x, y, z)` 的含义](#move_tox-y-z-的含义)
-- [运动限制和运行保护](#运动限制和运行保护)
-- [夹爪、停止和关闭力矩](#夹爪停止和关闭力矩)
-- [摄像头接入](#摄像头接入)
-- [快速开始](#快速开始)
-- [Python 调用示例](#python-调用示例)
-- [测试](#测试)
-- [手动真机验证](#手动真机验证)
-- [已经完成的真机验证](#已经完成的真机验证)
-- [项目结构](#项目结构)
-- [当前边界](#当前边界)
-- [建议的下一步](#建议的下一步)
+- [1. 当前项目处于什么阶段](#1-当前项目处于什么阶段)
+- [2. 快速开始：先运行 Mock](#2-快速开始先运行-mock)
+- [3. 整体架构和思维导图](#3-整体架构和思维导图)
+- [4. 一条命令怎样执行](#4-一条命令怎样执行)
+- [5. 核心对象、Skill 和 Adapter](#5-核心对象skill-和-adapter)
+- [6. SO-100 Plus 真机接入](#6-so-100-plus-真机接入)
+- [7. 坐标、TCP 和 `move_to()`](#7-坐标tcp-和-move_to)
+- [8. 安全边界和已保存的真机配置](#8-安全边界和已保存的真机配置)
+- [9. 摄像头是独立可选功能](#9-摄像头是独立可选功能)
+- [10. Python 调用示例](#10-python-调用示例)
+- [11. 测试、仿真和真机工具](#11-测试仿真和真机工具)
+- [12. 已经完成的真机验证](#12-已经完成的真机验证)
+- [13. 项目结构](#13-项目结构)
+- [14. 当前限制和下一步](#14-当前限制和下一步)
+- [15. 延伸文档](#15-延伸文档)
 
-## 项目定位
+## 1. 当前项目处于什么阶段
 
-RosClaw Mini 希望解决的是“上层命令如何安全地落到机械臂动作”这个问题。
-项目把不同职责拆成独立层：
+### 一句话结论
 
-1. `Command` 描述用户想执行什么；
-2. Skill Registry 判断这个动作是否存在、是否启用；
-3. Validator 检查参数结构；
-4. Safety Checker 根据 Skill 自己的 `ParamSpec` 检查数值边界；
-5. Gateway 编排整个流程并统一处理错误；
-6. ArmHandlers 把业务 Skill 映射为机械臂原子动作；
-7. ArmAdapter 隔离 Mock、SO-100 Plus 或未来其他硬件的差异；
-8. 所有业务执行都返回统一的 `ExecutionResult`。
+当前阶段已经完成“真实 SO-100 Plus 单臂的底层接入、受控验证和 JSON 主链路装配”。真机入口已经可启动，但仍属于需要操作者在场的教学原型，不是无人值守应用。
 
-项目当前不是一个完整的通用机器人平台。以下能力仍未接入主执行链路：
+### 完成状态
 
-- LLM 自然语言规划；
-- RAG 知识检索；
-- ROS 2 节点、Topic、Service 和 Action；
-- Web API 与前端；
-- 视觉识别和视觉闭环控制；
-- 碰撞检测和避障；
-- 状态持久化、完整审计日志和任务状态机。
-
-仓库中已经为其中一部分能力保留了目录或空文件，但“文件存在”不代表功能已经完成。
-
-## 当前完成状态
-
-| 模块 | 当前状态 | 是否进入默认入口 |
+| 能力 | 当前状态 | 是否进入默认入口 |
 | --- | --- | --- |
-| Command / ExecutionResult 数据模型 | 已实现 | 是 |
-| SkillDefinition / ParamSpec | 已实现 | 是 |
-| Skill Registry | 已实现 | 是 |
-| 参数 Validator | 已实现 | 是 |
-| Safety Checker | 已实现 | 是 |
-| Command Gateway | 已实现 | 是 |
-| ArmHandlers | 已实现 | 是 |
-| ArmAdapter 抽象接口 | 已实现 | 是 |
-| MockArmAdapter | 已实现 | 是，默认后端 |
-| SO100PlusAdapter | 已实现并进行过真机验证 | 否，需手动脚本 |
-| SO-100 Plus FK / IK / TCP | 已实现并进行过局部验证 | 否 |
-| SO-100 Plus 固定姿态正式工作空间 | 真机边界代表点全部测试；登记内缩后的 `12 × 6 × 12 cm` 可达长方体 | 可通过专用 Skill 构造函数接入 |
-| SO-100 Plus 外层仿真候选框 | 百万姿态扫描完成；外层仍只属于仿真候选 | 否 |
-| SO-100 Plus 摄像头接口 | 软件接入完成 | 否，真实单帧尚未验证 |
-| 全局实机 XYZ 工作空间 | 尚未认证 | 否 |
-| LLM / RAG / Web / ROS 2 | 尚未接入 | 否 |
+| `Command` / `SafetyResult` / `ExecutionResult` | 已实现 | 是 |
+| `SkillDefinition` / `ParamSpec` | 已实现 | 是 |
+| Skill Registry、Validator、Safety Checker、Gateway | 已实现 | 是 |
+| `ExecutionController` 后台执行与 `stop` 请求 | 已实现 | 是 |
+| `ArmHandlers` / `ArmAdapter` | 已实现 | 是 |
+| `MockArmAdapter` | 已实现 | 是，默认后端 |
+| `SO100PlusAdapter` | 已实现并经过真机验证 | 是，必须显式选择真机并确认风险 |
+| SO-100 Plus FK、IK、TCP 和关节路径 | 已实现 | 是，由真机运行时装配 |
+| 当前 `right_follower` 正式工作空间 | 已登记 `12 × 6 × 12 cm` 固定姿态可达长方体 | 可通过专用 Skill 构造函数使用 |
+| 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
+| USB 摄像头接口 | 软件接口和 FakeCamera 测试完成 | 否，真实单帧尚未验收 |
+| 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
+| 配置文件加载 | `configs/*.yaml` 仍为空且未接线 | 否 |
+| LLM、RAG、Web、ROS 2 | 尚未形成可用链路 | 否 |
 
-## 整体架构和思维导图
+### 现在可以安全做什么
 
-下面的图恢复了原 README 的 Mermaid 流程图，并根据当前代码更新了
-Validator、ArmHandlers、ArmAdapter 和真实机械臂分支。
+- 运行默认 Mock 交互入口；
+- 运行完整单元测试；
+- 离线计算 FK、IK、TCP 和轨迹；
+- 在 MuJoCo 中查看模型、TCP 和路径；
+- 阅读已保存的真机配置和验证报告。
+
+### 哪些操作会接触真实设备
+
+- 创建并连接真实 `SO100PlusAdapter`；
+- 运行带 `--acknowledge-...` 参数的真机脚本；
+- 运行摄像头检查脚本；
+- 运行 PID EEPROM 调参脚本。
+
+## 2. 快速开始：先运行 Mock
+
+### 环境
+
+本项目当前开发环境使用 Python 3.10，Conda 环境名为：
+
+```text
+rosclaw-mini-py310
+```
+
+仓库根目录的 `pyproject.toml` 目前只保存 pytest 基础配置，`requirements.txt` 还没有完整声明真机依赖。因此下面的命令假设该 Conda 环境已经准备好。
+
+```bash
+conda activate rosclaw-mini-py310
+cd rosclaw-mini
+```
+
+### 启动默认入口
+
+```bash
+PYTHONPATH=src python -m rosclaw_mini.main
+```
+
+不传 `--backend` 时，入口固定选择 `MockArmAdapter`，不会访问 `/dev/lerobot_right`。它接受结构化 JSON，不会调用大语言模型。
+
+移动 Mock TCP：
+
+```json
+{"skill_name": "move_arm", "params": {"x": 0.5, "y": 0.4, "z": 0.3}}
+```
+
+夹爪与停止：
+
+```json
+{"skill_name": "open_gripper", "params": {}}
+{"skill_name": "close_gripper", "params": {}}
+{"skill_name": "stop", "params": {}}
+```
+
+查看后台命令结果：
+
+```text
+result
+```
+
+退出：
+
+```text
+exit
+```
+
+`main.py` 中的 Mock 移动默认持续 5 秒，目的是让后台执行和运动中 `stop` 更容易观察。正在执行普通动作时不能再提交第二个普通动作，但仍可以提交 `stop`。
+
+### 显式启动 SO-100 Plus
+
+> 下面的命令会连接真实机械臂并启用力矩。这里只记录入口用法；本次 README 更新没有执行该命令。
+
+```bash
+PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
+  --backend so100_plus \
+  --port /dev/lerobot_right \
+  --calibration-dir lerobot-joycon_plus/.cache/calibration/so100_plus \
+  --follower-name right \
+  --acknowledge-so100-plus-risk
+```
+
+真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认时，程序会在创建 Robot 和访问串口之前拒绝启动。
+
+连接后，入口会读取六个手臂关节并用 FK 打印当前 TCP。只有启动 TCP
+已经位于 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 内时，JSON
+`move_arm` 才保持启用；如果机械臂仍处于 `follower_rest` 等正式工作区外
+姿态，运行时会失败关闭 `move_arm` 并打印原因。此时 `stop`、
+`open_gripper` 和 `close_gripper` 仍可使用。当前统一入口不会猜测或自动
+执行 `follower_rest → JoyCon 初始工作姿态` 的展开轨迹；使用已单独
+验收的流程进入工作区后，需要重新启动统一入口，启动门禁才会重新判断。
+
+输入 `exit`、输入结束或按下 Ctrl+C 时，运行时会：
+
+```text
+stop()
+→ 等待后台动作结束
+→ disconnect()
+```
+
+普通退出不会调用 `disable_torque()`。
+
+### 运行测试
+
+```bash
+python -m pytest -q
+```
+
+当前仓库验证结果：
+
+```text
+255 passed
+```
+
+默认测试全部使用 Mock、FakeRobot、FakeBus 或 FakeCamera，不打开真实串口和视频设备。
+
+## 3. 整体架构和思维导图
+
+项目遵守下面的边界：上层只表达意图，真实硬件差异只进入 Adapter，电机驱动不会被 Skill Handler 直接调用。
 
 ```mermaid
 flowchart TD
-    A[JSON 或上层结构化输入] --> B[解析为 Command]
-    B --> C[Skill Registry 查找 SkillDefinition]
+    A[JSON 或未来上层输入] --> B[Parser: 解析为 Command]
+    B --> C[Skill Registry: 查找 SkillDefinition]
 
-    C -->|技能不存在| R[返回失败 ExecutionResult]
-    C -->|技能存在| D{Skill 是否启用}
-    D -->|否| R
-    D -->|是| E[Validator 校验参数结构]
+    C -->|不存在| X[失败 ExecutionResult]
+    C -->|存在| D{enabled?}
+    D -->|否| X
+    D -->|是| E[Validator: 参数结构]
 
-    E -->|缺参数、类型错误或额外参数| R
-    E -->|结构合法| F[Safety Checker]
-    F -->|数值越界或非有限值| R
-    F -->|安全检查通过| G[Gateway 调用 Skill Handler]
+    E -->|缺参数、类型错误、额外参数| X
+    E -->|通过| F[Safety Checker: ParamSpec 数值边界]
+    F -->|越界、NaN、Infinity| X
+    F -->|通过| G[Gateway 调用 Handler]
 
     G --> H[ArmHandlers]
-    H --> I{选择的 ArmAdapter}
+    H --> I{ArmAdapter 后端}
 
     I -->|默认| J[MockArmAdapter]
     I -->|显式真机配置| K[SO100PlusAdapter]
 
-    J --> L[修改内存中的模拟状态]
-
-    K --> M[运动学、限制与轨迹保护]
+    J --> L[内存中的模拟状态]
+    K --> M[运动学 + 关节/工作空间限制 + 轨迹保护]
     M --> N[LeRobot ManipulatorRobot]
     N --> O[FeetechMotorsBus]
     O --> P[7 个 STS3215 电机]
 
-    K --> Q[OpenCV USB Camera]
+    K -. 独立可选接口 .-> Q[OpenCV USB Camera]
 
-    L --> S[成功 ExecutionResult]
-    P --> S
-
-    G -->|Handler 或 Adapter 抛出异常| R
+    L --> Y[成功 ExecutionResult]
+    P --> Y
+    G -->|Handler 或 Adapter 异常| X
 ```
 
-从分层角度看，项目结构是：
+摄像头画成虚线，是因为它由 `SO100PlusAdapter` 暴露统一接口，但生命周期与机械臂连接完全独立：不配置摄像头也能连接机械臂，机械臂未连接时也能单独抓图。
+
+### 各层说人话解释
+
+| 层 | 本项目中的具体含义 | 不应该做什么 |
+| --- | --- | --- |
+| Parser | 把 JSON 字符串变成 `Command` | 不连接硬件，不判断真实路径 |
+| Skill Registry | 按名字找到 `SkillDefinition` | 不执行动作 |
+| Validator | 检查参数是否齐全、类型是否正确、有没有多余字段 | 不写电机 |
+| Safety Checker | 读取 `ParamSpec` 的上下限并检查数值 | 不为每个 Skill 写一堆硬编码分支 |
+| Gateway | 按固定顺序组织查找、校验、检查和执行 | 不直接调用 Feetech 驱动 |
+| ArmHandlers | 把 Skill 映射成一个或多个 Adapter 原子动作 | 不直接依赖 LeRobot |
+| ArmAdapter | 把不同硬件驱动统一成 `move_to()` 等操作 | 不解析 Command，不生成 `ExecutionResult` |
+| 厂商驱动 | 最终读写串口、电机寄存器和相机 | 不暴露给上层业务命令 |
+
+真实机械臂上的直观映射是：
 
 ```text
-输入层
-└── JSON / 未来 LLM、Web、ROS 2
-
-命令层
-└── Command / ExecutionResult
-
-技能与安全层
-├── Skill Registry
-├── Validator
-├── Safety Checker
-└── WorkspaceLimits / JointLimits
-
-编排层
-├── Command Gateway
-└── ArmHandlers
-
-统一硬件接口
-└── ArmAdapter
-    ├── MockArmAdapter
-    └── SO100PlusAdapter
-        ├── SO100PlusKinematics
-        ├── LeRobot ManipulatorRobot
-        ├── FeetechMotorsBus
-        └── OpenCV Camera
+上层统一接口
+→ SO100PlusAdapter
+→ LeRobot ManipulatorRobot
+→ FeetechMotorsBus
+→ 7 个 STS3215 电机
 ```
 
-## 一条命令如何执行
+## 4. 一条命令怎样执行
 
-调用 `run_command(command, skills)` 后，Gateway 严格按照下面的顺序处理：
-
-### 1. 查找 Skill
-
-Gateway 根据 `command.skill_name` 在传入的 Skill 字典中查找
-`SkillDefinition`。
-
-如果不存在，立即返回：
+以 `move_arm` 为例：
 
 ```text
-技能不存在: <skill_name>
-```
-
-### 2. 检查 Skill 是否启用
-
-Skill 可以存在但处于 `enabled=False` 状态。例如，调用方没有提供明确的
-`WorkspaceLimits` 时，`move_arm` 会失败关闭，而不是使用一个猜测的实机范围。
-
-失败结果示例：
-
-```text
-技能未启用: move_arm
-```
-
-### 3. Validator 检查参数结构
-
-`validate_skill_params()` 负责检查：
-
-- 所有必需参数是否存在；
-- 参数的精确 Python 类型是否允许；
-- 是否包含未声明的额外参数。
-
-例如，`move_arm` 需要 `x`、`y`、`z`，并且默认不接受 `speed` 之类的
-额外字段。
-
-### 4. Safety Checker 检查数值安全边界
-
-`check_command()` 再次防御性检查命令与 Skill 是否匹配，并读取
-`ParamSpec` 中的：
-
-- `min_value`；
-- `max_value`；
-- `min_inclusive`；
-- `max_inclusive`。
-
-它也会拒绝 `NaN`、正无穷和负无穷。Checker 不再把
-`0 < x,y,z <= 1` 写死成所有机械臂的通用范围。
-
-### 5. 调用 Handler
-
-通过所有检查后，Gateway 调用 `skill.handler(command)`。
-
-机械臂 Skill 当前由 `ArmHandlers` 处理。例如：
-
-```text
-move_arm Command
+{"skill_name": "move_arm", "params": {"x": ..., "y": ..., "z": ...}}
+→ parse_json_command()
+→ Command
+→ run_command(command, skills)
+→ find_skill("move_arm")
+→ 检查 enabled
+→ validate_skill_params()
+→ check_command()
 → ArmHandlers.move_arm()
 → adapter.move_to(x, y, z)
+→ ExecutionResult
 ```
 
-Handler 不知道底层是 Mock 还是真实机械臂。
+Gateway 的失败顺序也很明确：
 
-### 6. 返回统一结果
+1. Skill 不存在：返回 `技能不存在`；
+2. Skill 存在但未启用：返回 `技能未启用`；
+3. 参数缺失、类型错误或多余：Validator 拒绝；
+4. 参数数值越界或不是有限值：Safety Checker 拒绝；
+5. Handler 或 Adapter 抛出异常：Gateway 转成失败的 `ExecutionResult`；
+6. 正常完成：Handler 返回成功的 `ExecutionResult`。
 
-正常完成时，Handler 返回成功的 `ExecutionResult`。如果 Handler 或
-Adapter 抛出异常，Gateway 会捕获异常并转换为：
+### 后台执行与停止
+
+`ExecutionController` 用一个后台线程执行普通命令：
 
 ```text
-技能执行失败: <具体错误>
+controller.submit(move_command)
+→ 后台运行 Gateway
+→ 主线程仍可接收 stop
+→ controller.request_stop(stop_command)
+→ adapter.stop()
 ```
 
-这样，上层不需要直接处理 LeRobot、串口或运动学异常类型。
+它当前只允许一个普通命令同时运行。`stop` 走单独入口，不需要等待正在执行的移动先返回。
 
-## 核心数据结构
+## 5. 核心对象、Skill 和 Adapter
 
-### Command
+### 核心数据对象
 
-`Command` 表示一条准备交给 Gateway 的结构化命令。
-
-| 字段 | 类型 | 说明 |
+| 对象 | 关键字段 | 作用 |
 | --- | --- | --- |
-| `command_id` | `str` | 命令唯一标识，用于追踪执行 |
-| `skill_name` | `str` | 要调用的 Skill 名称 |
-| `params` | `dict` | Skill 参数 |
-| `source` | `str` | 命令来源，例如 `user`、`system` |
+| `Command` | `command_id`, `skill_name`, `params`, `source` | 描述要做什么 |
+| `SafetyResult` | `command_id`, `is_safe`, `risk_level`, `reason` | 描述安全检查结论 |
+| `ExecutionResult` | `command_id`, `skill_name`, `success`, `message` | 统一返回执行结果 |
+| `ParamSpec` | 类型、必填、上下限、开闭区间 | 描述一个参数允许什么值 |
+| `SkillDefinition` | 名字、描述、风险、启用状态、参数表、Handler | 把 Skill 元数据与执行入口放在一起 |
 
-示例：
+当前 `risk_level` 会进入安全结果，但项目还没有实现完整的用户身份、动态审批和分级授权系统。
 
-```python
-Command(
-    command_id="cmd-001",
-    skill_name="move_arm",
-    params={"x": 0.30, "y": 0.00, "z": 0.20},
-    source="user",
-)
-```
+### 当前内置 Skill
 
-### SafetyResult
+`build_arm_skills(adapter, workspace_limits)` 创建五个 Skill：
 
-`SafetyResult` 是 Safety Checker 的输出。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `command_id` | `str` | 对应的命令 ID |
-| `is_safe` | `bool` | 是否允许继续执行 |
-| `risk_level` | `str` | Skill 风险等级或拒绝后的 `high` |
-| `reason` | `str` | 检查通过说明或拒绝原因 |
-
-### ExecutionResult
-
-`ExecutionResult` 是 Gateway 对外返回的统一结果。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `command_id` | `str` | 对应的命令 ID |
-| `skill_name` | `str` | 实际处理的 Skill |
-| `success` | `bool` | 是否成功 |
-| `message` | `str` | 成功说明或失败原因 |
-
-### ParamSpec
-
-`ParamSpec` 描述一个 Skill 参数可以接受什么。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `accepted_types` | `tuple[type, ...]` | 允许的精确类型 |
-| `required` | `bool` | 是否必需，默认 `True` |
-| `min_value` | `float \| None` | 可选最小值 |
-| `max_value` | `float \| None` | 可选最大值 |
-| `min_inclusive` | `bool` | 是否包含最小值 |
-| `max_inclusive` | `bool` | 是否包含最大值 |
-
-### SkillDefinition
-
-`SkillDefinition` 把 Skill 的说明、参数和执行函数放在一起。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `skill_name` | `str` | Skill 唯一名称 |
-| `description` | `str` | 功能说明 |
-| `risk_level` | `str` | 当前风险等级元数据 |
-| `enabled` | `bool` | 是否允许 Gateway 调用 |
-| `params_schema` | `dict[str, ParamSpec]` | 参数定义 |
-| `handler` | `Callable` | 通过检查后调用的处理函数 |
-| `allow_extra_params` | `bool` | 是否接受额外参数，默认 `False` |
-
-风险等级目前会进入 `SafetyResult`，但还没有独立的用户授权策略或动态审批系统。
-
-## 内置 Skill
-
-`build_arm_skills(adapter, workspace_limits)` 当前创建五个 Skill：
-
-| Skill | 风险等级 | 参数 | Adapter 原子动作 | 默认状态 |
+| Skill | 风险等级 | 参数 | Adapter 映射 | 默认状态 |
 | --- | --- | --- | --- | --- |
-| `move_arm` | `medium` | `x`, `y`, `z` | `move_to(x, y, z)` | 只有传入工作空间时启用 |
+| `move_arm` | `medium` | `x`, `y`, `z` | `move_to(x, y, z)` | 只有显式提供工作空间才启用 |
 | `open_gripper` | `low` | 无 | `open_gripper()` | 启用 |
 | `close_gripper` | `low` | 无 | `close_gripper()` | 启用 |
 | `stop` | `low` | 无 | `stop()` | 启用 |
 | `disable_torque` | `high` | 无 | `disable_torque()` | 默认禁用 |
 
-`move_arm` 的参数单位由 Adapter 接口统一定义为米，表示机械臂底座坐标系中的
-绝对 TCP 坐标。
+`disable_torque` 默认禁用的是 Gateway/普通命令入口，不是删除 Adapter 的卸力能力。受控维护流程仍可直接调用 Adapter；普通卸力必须先验证机械臂处于 `follower_rest`。
 
-复杂任务以后可以由多个原子动作组成。例如，一个 `pick` Skill 可以编排：
+复杂 Skill 应在 Handler 层组合原子动作。例如未来的 `pick` 可以是：
 
 ```text
 open_gripper()
@@ -332,154 +311,88 @@ open_gripper()
 
 当前仓库没有把这个示例实现成正式 `pick` Skill。
 
-## ArmAdapter 统一硬件接口
+### `ArmAdapter` 原子操作
 
-`ArmAdapter` 是所有机械臂后端必须实现的抽象接口。
-
-| 接口 | 作用 |
+| 接口 | 统一含义 |
 | --- | --- |
-| `is_connected` | 查询连接状态 |
-| `connect()` | 建立后端连接 |
-| `disconnect()` | 关闭后端通信 |
-| `move_to(x, y, z)` | 移动夹爪 TCP 到绝对位置 |
+| `is_connected` | 查询机械臂后端连接状态 |
+| `connect()` | 连接后端 |
+| `disconnect()` | 断开后端通信 |
+| `move_to(x, y, z)` | 把夹爪 TCP 移到绝对坐标 |
 | `open_gripper()` | 打开夹爪 |
 | `close_gripper()` | 关闭夹爪 |
-| `stop()` | 停止剩余动作并保持当前位置 |
-| `disable_torque()` | 关闭关节力矩 |
+| `stop()` | 取消剩余动作并保持当前位置 |
+| `disable_torque(emergency=False)` | 在满足收纳条件后关闭力矩；紧急路径必须显式指定 |
 
-Adapter 只负责统一硬件动作，不负责：
+`SO100PlusAdapter` 还提供 `move_joints()` 和摄像头方法，但它们目前不是所有机械臂后端共同保证的基础接口，也没有映射成普通上层 Skill。
 
-- 解析 JSON；
-- 查找 Skill；
-- 生成 `ExecutionResult`；
-- 决定业务任务的动作顺序；
-- 执行 LLM 或 RAG；
-- 判断用户是否有操作权限。
+## 6. SO-100 Plus 真机接入
 
-这种分层使 `ArmHandlers` 可以同时绑定 Mock 或真实后端，而不需要复制业务逻辑。
+### 已确认的当前设备
 
-## Mock 后端
-
-`MockArmAdapter` 不会导入真实机械臂驱动，也不会访问 `/dev` 设备。它通过修改
-内存属性模拟操作：
-
-| 动作 | Mock 行为 |
-| --- | --- |
-| `connect()` | 把连接状态和模拟力矩设为开启 |
-| `disconnect()` | 把连接状态和模拟力矩设为关闭 |
-| `move_to()` | 记录新的 `(x, y, z)` |
-| `open_gripper()` | 把夹爪状态记录为打开 |
-| `close_gripper()` | 把夹爪状态记录为关闭 |
-| `stop()` | 把停止状态记录为 `True` |
-| `disable_torque()` | 把模拟力矩状态设为关闭 |
-
-它适合验证命令链路、失败分支和上层逻辑，但不能代表真实机械臂的：
-
-- 可达性；
-- 运动精度；
-- 碰撞情况；
-- 电机负载；
-- 温度；
-- 回差或重力下垂。
-
-## SO-100 Plus 真机后端
-
-### 已确认的设备配置
-
-| 项目 | 当前配置 |
+| 项目 | 当前值 |
 | --- | --- |
 | 型号 | SO-100 Plus 单臂 |
-| follower | `right` |
+| follower 名称 | `right` |
 | 稳定串口别名 | `/dev/lerobot_right` |
 | 校准文件 | `right_follower.json` |
 | 校准目录 | `lerobot-joycon_plus/.cache/calibration/so100_plus` |
-| 电机型号 | 7 个 STS3215 |
-| 电机总线 | FeetechMotorsBus |
-| LeRobot 包装 | ManipulatorRobot |
+| 电机 | 7 个 STS3215 |
+| 电机总线 | LeRobot `FeetechMotorsBus` |
+| 机器人包装 | LeRobot `ManipulatorRobot` |
 
-这些值属于当前这台 `right_follower`。其他 SO-100、SO-100 Plus 或其他校准文件
-不能直接假设使用相同的角度和保护参数。
+这些配置只属于当前这台 `right_follower`。更换 follower 名称时，Factory 会按 `<follower_name>_follower.json` 寻找校准文件，不能随机复用当前文件。
 
 ### 电机映射
 
-| ID | LeRobot 名称 | 作用 |
+| ID | 驱动名称 | 机械作用 |
 | ---: | --- | --- |
 | 1 | `shoulder_rotation_joint` | 底座旋转 |
-| 2 | `shoulder_pitch_joint` | 肩关节俯仰 |
-| 3 | `ellbow_joint` | 肘关节，名称沿用源项目拼写 |
+| 2 | `shoulder_pitch_joint` | 肩部俯仰 |
+| 3 | `ellbow_joint` | 肘关节；拼写沿用驱动源码 |
 | 4 | `wrist_pitch_joint` | 腕部俯仰 |
 | 5 | `wrist_jaw_joint` | 腕部偏航 |
 | 6 | `wrist_roll_joint` | 腕部滚转 |
 | 7 | `gripper_joint` | 夹爪开合 |
 
-前六个关节参与 FK 和 IK，第七个电机由夹爪动作单独控制。
+前六个关节参与 FK 和 IK，第七个由夹爪动作单独控制。
 
-### 连接前预检
+### 连接前 Factory 会检查什么
 
-`SO100PlusRobotConfig` 根据显式配置构造机器人。Factory 在导入 LeRobot
-或打开串口前检查：
+`SO100PlusRobotConfig` 保存串口、校准目录和 follower 名称。`validate_so100_plus_config()` 在打开串口前检查：
 
-- follower 名称是否是简单标识符；
+- follower 名称是不是简单标识符；
 - 串口是否存在且为字符设备；
-- 校准 JSON 是否存在、可读且能解析；
+- 对应校准 JSON 是否存在、可读、能解析；
 - `motor_names` 是否与七个电机的名称和顺序完全一致；
 - 每个校准向量是否恰好包含七个值。
 
-校准文件缺失或不匹配时会直接失败，不允许 LeRobot 自动进入重新校准流程。
+缺少校准或内容不匹配时会立即失败，避免 LeRobot 自动进入重新校准。
 
-### 连接不是只读操作
+仓库同时提供 `create_so100_plus_readonly_robot()`。它可以加载现有校准并读取电机，不写力矩、PID 或目标位置，适合预检；它与正式 `SO100PlusAdapter.connect()` 的行为不同。
 
-`ManipulatorRobot.connect()` 会打开串口、加载校准、设置运行配置并启用力矩。
-`SO100PlusAdapter.connect()` 还会：
-
-1. 同步实测位置和目标位置，降低旧目标导致跳动的风险；
-2. 写入并回读关节 P 参数；
-3. 写入运行时加速度；
-4. 关闭电机 EEPROM 写锁；后续只有显式 PID 调参接口才会短暂解锁；
-5. 读取电压、电流、负载和温度。
-
-摄像头不属于机械臂连接前置条件。`connect()` 和 `disconnect()` 不会
-检查、连接或关闭摄像头。
-
-因此，“只看一下是否能连接”也属于会改变机械臂状态的真机操作。
-
-## `move_to(x, y, z)` 的含义
-
-### 单位和目标类型
-
-- `x`、`y`、`z` 的单位都是米；
-- 三个值是绝对坐标，不是相对移动距离；
-- 所有值必须是有限数值；
-- 目标必须位于调用方显式传入的 `WorkspaceLimits` 内。
-
-如果需要从当前位置“向上 10 cm”，脚本必须先读取当前 TCP，再把目标计算为：
+### 正式连接会做什么
 
 ```text
-(current_x, current_y, current_z + 0.10)
+adapter.connect()
+→ robot.connect()
+→ 打开串口并加载校准
+→ 同步 Present_Position 与 Goal_Position
+→ 写入并回读已保存的运行参数
+→ 启用力矩
+→ 关闭 EEPROM 写锁
+→ 读取初始遥测
 ```
 
-而不是直接调用 `move_to(0, 0, 0.10)`。
+因此 `connect()` 可能让机械臂变硬，不能把它当成“只看端口有没有”的无风险命令。
 
-### 坐标系
+摄像头不在这条连接链中。未插摄像头或完全不配置摄像头，不影响机械臂连接。
 
-坐标使用 `lerobot_kinematics` SO-100 Plus 模型的底座固定坐标系：
+## 7. 坐标、TCP 和 `move_to()`
 
-- 原点在运动学模型的机械臂底座原点；
-- `+Z` 是模型向上方向；
-- `+X` 是模型零位时机械臂主要向外伸展的方向；
-- `+Y` 由右手坐标系确定，是底座水平侧向。
+### `move_to(x, y, z)` 控制哪个点
 
-底座在桌面上的安装方向会改变这些轴相对于操作者和房间的方向。
-
-### TCP 是哪个点
-
-`move_to()` 控制的是两根夹指最前端内侧之间的夹持中心，也就是
-TCP（Tool Center Point），不是：
-
-- 腕关节中心；
-- 夹爪电机轴；
-- 第六关节法兰原点；
-- 摄像头光心。
+它控制两根夹指最前端内侧之间的夹持中心，也就是 TCP（Tool Center Point）。它不是腕关节中心、夹爪电机轴、第六关节法兰原点或摄像头光心。
 
 第六关节运动学末端到 TCP 的固定工具局部偏移是：
 
@@ -487,372 +400,226 @@ TCP（Tool Center Point），不是：
 (0.10127, -0.00690, 0.00118) m
 ```
 
-### 姿态
+### 坐标语义
 
-当前接口只接收位置，不接收 roll、pitch、yaw。IK 会读取当前 TCP 姿态，
-保持当前旋转矩阵，只改变 TCP 的位置。因此它的完整语义是：
+- 单位是米；
+- `x/y/z` 是机械臂底座坐标系中的绝对位置；
+- `+Z` 是模型向上；
+- `+X` 是模型零位时主要向外伸展的方向；
+- `+Y` 由右手坐标系确定；
+- 底座在桌面上的安装方向决定这些轴相对操作者的方向。
+
+如果当前 TCP 是 `(cx, cy, cz)`，要求“向上 10 cm”的目标是：
 
 ```text
-保持当前夹爪姿态，把 TCP 移动到新的绝对 x/y/z
+(cx, cy, cz + 0.10)
 ```
 
-### 规划与执行
+不是 `move_to(0, 0, 0.10)`。
 
-一次真实 `move_to()` 大致经过：
+### 当前姿态策略
+
+`move_to()` 目前只接收位置，不接收 roll、pitch、yaw。IK 会读取当前 TCP 姿态，保持当前旋转矩阵，只改变位置：
 
 ```text
-读取当前 6 个关节角
-→ 驱动角转换为模型弧度
+保持当前夹爪姿态
+→ 把夹爪 TCP 移到新的绝对 x/y/z
+```
+
+### 从坐标到电机的完整过程
+
+```text
+读取前 6 个电机角度
+→ 驱动角转换为运动学模型弧度
 → FK 计算当前 TCP
 → 检查目标工作空间
-→ IK 求解目标关节角
-→ FK 复算目标位置和姿态误差
-→ 检查关节范围和规划步长
+→ IK 求目标关节角
+→ FK 复算目标位置和姿态
+→ 检查关节范围与规划内部步长
 → 生成关节路径
-→ 30 Hz 余弦缓入缓出发送目标
-→ 持续读取跟踪误差和遥测
-→ 最终检查关节误差与 TCP 误差
+→ 30 Hz 余弦缓入缓出流式下发
+→ 持续读取跟踪误差、负载和温度
+→ 等待到位并观察最终稳定性
+→ 检查关节误差与 TCP 误差
 ```
 
-规划失败、IK 失败、误差超限或遥测触发保护时，Adapter 会抛出异常，
-Gateway 会把它转换成失败的 `ExecutionResult`。
+规划失败、IK 失败、路径超限、运行保护触发或最终无法收敛时，Adapter 抛出明确异常，Gateway 再把它转换成失败结果。
 
-## 运动限制和运行保护
+## 8. 安全边界和已保存的真机配置
 
-### 显式工作空间
-
-`WorkspaceLimits` 保存 TCP 的三轴闭区间，单位统一为米：
-
-```python
-WorkspaceLimits(
-    x=AxisLimits(x_min, x_max),
-    y=AxisLimits(y_min, y_max),
-    z=AxisLimits(z_min, z_max),
-)
-```
-
-当前 `right_follower` 已登记一个真机测试后的固定姿态正式工作空间：
+当前安全不是单个 `if`，而是四层共同作用：
 
 ```text
-X:  0.313571423 .. 0.433571423 m
-Y: -0.041185494 .. 0.018814506 m
-Z:  0.179328483 .. 0.299328483 m
+命令参数边界
+→ TCP 工作空间
+→ IK、关节范围和路径步长
+→ 运行中的跟踪误差、负载、温度与最终到位检查
 ```
 
-它是原 `14 × 8 × 14 cm` 仿真候选框每个面内缩 `1 cm` 后的
-`12 × 6 × 12 cm` 长方体。14 个边界代表点均已执行真机运动，其中
-12 个满足 `12 mm` 到位门槛，2 个安全到达但误差分别约为
-`24.800 mm` 和 `14.780 mm`。因此它的正式含义是“当前工位的可达目标
-范围”，不是“全域保证 12 mm 精度”。
+这些软件保护不能代替物理急停、断电、现场清障和人工看护。
 
-代码常量为
-`SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS`。它只适用于当前
-`right_follower`、校准文件、底座、无障碍工位和 JoyCon 初始 TCP 姿态
-附近；不是任意姿态或其他机械臂的全局 XYZ 工作空间。
+### 正式固定姿态工作空间
 
-### 关节限制
+当前 `right_follower` 登记的 TCP 三轴闭区间为：
 
-`JointLimits` 保存：
+```text
+X:  0.3135714232672181 .. 0.4335714232672181 m
+Y: -0.041185494280163625 .. 0.018814505719836373 m
+Z:  0.17932848288990053 .. 0.29932848288990055 m
+```
 
-- 六个模型关节名称；
-- 每个关节的弧度下限；
-- 每个关节的弧度上限；
-- 每个规划内部步骤允许的最大变化。
+尺寸约为 `12 × 6 × 12 cm`，代码唯一来源是：
 
-第三方模型关节范围用于拒绝明显异常的 IK 解，但不等于所有关节都完成了
-当前真机安装条件下的物理边界认证。
+```python
+SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
+```
 
-目前唯一由用户在关闭力矩时手动选择过的实机范围是底座旋转关节：
+这个范围来自 `14 × 8 × 14 cm` 仿真候选框六面各内缩一个 `1 cm` 网格。14 个内缩边界代表点已经全部执行真机运动：
+
+- 12 个点满足 `12 mm` 到位门槛；
+- `X` 最大面中心误差约 `24.800 mm`；
+- `X/Y/Z` 最大角误差约 `14.780 mm`；
+- 14 个点均未出现路径、负载或温度异常。
+
+所以这里的“正式”含义是：项目允许把该长方体作为当前工位的可达目标范围；它不表示范围内每一点都保证 `12 mm` 定位精度。
+
+统一真机入口还把这个范围作为启动门禁：当前 TCP 在范围外时，
+`move_arm` 的 Skill 会被禁用，因此即使提交的目标点本身位于长方体内，
+命令也不会到达 Adapter。这个门禁只约束统一 JSON 链路；直接调用
+Adapter 的本地维护代码仍由调用者承担前置姿态检查责任。
+
+适用条件必须同时满足：
+
+- 当前 `right_follower`；
+- 当前 `right_follower.json`；
+- 当前底座和线缆布置；
+- 桌面与底座底部齐平，TCP 不低于底部平面；
+- 工作区内没有新增障碍物；
+- JoyCon 初始 TCP 姿态附近，并由 `move_to()` 保持当前姿态。
+
+它不是任意夹爪姿态、任意机械臂或任意工位的全局工作空间。
+
+### 关节边界
+
+第三方 SO-100 Plus 模型范围用于拒绝明显异常的 IK 解，但不等于所有关节都完成了当前实机物理边界认证。
+
+当前唯一由用户在关闭力矩状态下人工选择过的绝对真机范围是底座关节：
 
 ```text
 LeRobot 校准后驱动角：[-19.599609°, 31.201172°]
 ```
 
-它只适用于当前底座和当前 `right_follower` 校准。
+正式运动限制构造函数为：
 
-### 已保存的实机运行配置
-
-`SO100PlusRealHardwareProfile` 保存了上一轮真机验证采用的配置：
-
-| 配置 | 当前值 | 用途 |
-| --- | ---: | --- |
-| 其他电机 P | 16 | 连接时写入 |
-| 肘关节 P | 64 | 改善负载下跟踪 |
-| 腕部俯仰 P | 24 | 减少目标附近的稳态误差 |
-| 运行时加速度 | 35 | 只写 RAM |
-| 夹爪单步 | 10° | 避免一次大幅开合 |
-| 夹爪步间等待 | 2.5 s | 等待位置反馈 |
-| 夹爪负载上限 | 300 | 夹持堵转保护 |
-| 夹爪位置容差 | 3° | 判断夹爪是否到位 |
-| 最终关节容差 | 3.0° | 判断六关节是否到位 |
-| 最终 TCP 容差 | 12 mm | FK 复算误差保护 |
-| 手臂普通过载上限 | 450 | 同一电机连续两次达到时停止 |
-| 手臂紧急负载上限 | 700 | 单次达到时立即停止 |
-| 普通过温上限 | 60°C | 同一电机连续两次达到时停止 |
-| 紧急温度上限 | 70°C | 单次达到时立即停止 |
-| 流式频率 | 30 Hz | 轨迹下发频率 |
-| 最大关节速度 | 20°/s | 限制流式运动速度 |
-| 跟踪误差上限 | 5° | 超限时停止剩余轨迹 |
-| 遥测间隔 | 0.25 s | 记录运行状态 |
-| 最终到位超时 | 8 s | 防止无限等待 |
-| 最终稳定观察 | 0.75 s | 进入 3°后继续观察再检查 TCP |
-
-最终稳定观察会记录六个关节的逐样本位置和峰峰值，并复算每个样本的
-TCP。真机 JSONL 日志保存 TCP 的 XYZ 最小值、最大值和平均值；最终
-12 mm 检查使用稳定窗口的最新位置。30 Hz 只让流式目标更细密，最大
-关节速度仍保持 20°/s。
-
-腕部俯仰 P=24 已完成一次真机写入和回读验证。收纳脱离与 JoyCon
-初始工作姿态通过，但第一个候选框目标的最终腕部误差为 `1.547°`，
-比当时的 `1.5°` 门槛多 `0.047°`，脚本因此安全停止并关闭力矩。
-本次最高温度 `39°C`、最高负载 `272/300`；P=24 保留。用户随后
-当时确认将关节容差调整为 `2.0°`，TCP 容差继续保持 `6 mm`；
-这是后续边界验收前的历史配置。
-
-使用 `2.0° / 6 mm` 重新验证后，第一个候选点不再因关节误差停止，
-但最终 TCP 误差为 `10.755 mm`，超过 6 mm 门槛，脚本再次安全停止
-并关闭力矩。本次最高温度 `40°C`、最高负载 `256/300`。当前瓶颈
-是多个关节各自小于 2°、但可以重复出现的稳态滞后，它们组合后形成
-更大的 TCP 误差；候选框仍未完成整套实机认证。
-
-30 Hz 加 0.75 秒稳定观察的下一次真机记录显示：收纳脱离阶段最大
-关节峰峰值为 `0.352°`、TCP 单轴最大波动为 `1.061 mm`；JoyCon
-初始工作姿态和第一个候选点的稳定关节波动均为 `0.000°`。第一个
-候选点的稳定 TCP 误差仍为 `11.907 mm`，其中 Z 方向低
-`11.571 mm`；底座、肘和腕俯仰分别稳定滞后约 `0.769°`、
-`1.099°` 和 `1.677°`。本次最高温度 `39°C`、最高负载
-`256/300`。因此约
-1.2 cm 的误差不是持续抖动或检测过早造成的。
-
-### 有限轮 PID 与残差补偿
-
-`scripts/tune_so100_plus_pid.py` 把后续试验限制为固定上限，不会无限
-循环搜索。它保持已经验证过的 P（底座 16、肘 64、腕俯仰 24），最多
-依次比较五组 I/D：
-
-```text
-(I=0, D=0)
-→ (I=0, D=16)
-→ (I=0, D=32)
-→ (I=1, D=前三组最佳 D)
-→ (I=2, D=前三组最佳 D)
+```python
+build_so100_plus_right_follower_motion_limits(current_joint_radians)
 ```
 
-每组只执行一次“JoyCon 初始姿态 → near_internal → 初始姿态”往返。
-任一结果同时满足 TCP 误差不超过 6 mm、TCP 单轴稳定波动不超过
-2 mm 时提前结束。否则从五组中选择综合误差和波动最小的一组；若其
-六关节残差均不超过 2°，最多再做一次反向残差补偿。补偿没有改善就
-停止，不再继续试。
+它组合正式 TCP 工作空间、实测底座范围、第三方模型范围和默认 `2°` 规划内部关节步长。这个 `2°` 是路径被检查时的内部离散步长，不是整次动作最多只能转两度；实际动作可以跨越多个内部步。
 
-PID 寄存器位于 EEPROM。Adapter 写入前保持当前位置，只解锁指定电机，
-每个电机写完立即重新上锁并读回核对。脚本仍保留 5° 跟踪误差、
-夹爪 300 负载、手臂 450 连续/700 紧急负载、60°C 连续过温确认、
-70°C 紧急温度、工作空间、关节范围和 MuJoCo 路径检查；异常时恢复
-本次调参前的 PID 基线并关闭力矩。
+### 已保存的真机运行配置
 
-脚本只把每组参数、稳定样本、负载、温度、评分和一次补偿结果写到
-JSONL，不会自行修改正式配置。最终又用完全相同的六关节目标比较了
-`I=2/D=16` 和 `I=2/D=32`：
+`SO100_PLUS_REAL_HARDWARE_PROFILE` 是当前 `right_follower` 验证后保存的默认配置：
 
-| 配置 | 最终 TCP 误差 | TCP 单轴稳定波动 | 最高负载 | 温度 |
-| --- | ---: | ---: | ---: | ---: |
-| I=2、D=16 | 8.583 mm | 3.652 mm | 260 | 39°C |
-| I=2、D=32 | 7.396 mm | 0.291 mm | 267 | 39°C |
+| 配置 | 当前值 | 作用 |
+| --- | ---: | --- |
+| 其他电机 P | 16 | 基础位置环增益 |
+| 肘关节 P | 64 | 改善主要负载关节跟踪 |
+| 腕部俯仰 P | 24 | 减少目标附近稳态误差 |
+| 已调关节 I / D | 2 / 32 | 底座、肘、腕俯仰使用 |
+| 运行时加速度 | 35 | RAM 参数，不改校准 |
+| 流式频率 | 30 Hz | 轨迹目标下发频率 |
+| 最大关节速度 | 20°/s | 限制流式运动速度 |
+| 流式跟踪误差 | 5° | 超限时停止剩余轨迹 |
+| 遥测间隔 | 0.25 s | 记录运行状态 |
+| 最终关节容差 | 3° | 六关节到位门槛 |
+| 最终 TCP 容差 | 12 mm | FK 复算到位门槛 |
+| 到位超时 | 8 s | 防止无限等待 |
+| 最终稳定观察 | 0.75 s | 到位后继续采样抖动 |
+| 手臂普通过载 | 450 | 同一电机连续 2 次达到时停止 |
+| 手臂紧急负载 | 700 | 单次达到时立即停止 |
+| 普通过温 | 60°C | 同一电机连续 2 次达到时停止 |
+| 紧急温度 | 70°C | 单次达到时立即停止 |
+| 夹爪单步 | 10° | 分段开合 |
+| 夹爪等待 | 2.5 s | 等待位置反馈 |
+| 夹爪负载上限 | 300 | 堵转保护 |
+| 夹爪位置容差 | 3° | 判断夹爪到位 |
 
-因此正式保存 `I=2、D=32`。它应用于底座旋转、肘和腕俯仰三个主要
-跟踪关节；P 分别保持 `16、64、24`，其余手臂关节保持 `16/0/0`。
-这个固定目标的 7.396 mm 仍高于 6 mm 门槛，所以它是当前两组中的
-最佳实机配置，不等于已经证明所有目标都达到 6 mm。
+最终稳定观察会保存关节位置样本、峰峰值和 TCP 样本统计，方便区分“还在移动”“机械回差/抖动”和“运动学目标本身有偏差”。
 
-旧版 LeRobot 连接预设会先写回 `P=16、I=0、D=0` 并打开 EEPROM
-写锁。`SO100PlusAdapter.connect()` 随后先保持实测位置、统一上锁，
-只恢复数值不同的正式 PID，逐个重新上锁并回读核对。因此新的 PID
-会在后续每次 Adapter 连接时恢复。
+### `stop()`、`disable_torque()` 和 `disconnect()` 的区别
 
-运行期间会记录或检查：
-
-- `Present_Position`；
-- `Present_Voltage`；
-- `Present_Current`；
-- `Present_Load`；
-- `Present_Temperature`。
-
-这些值是当前教学版机械臂的实测运行配置，不是厂商精度或安全等级声明。
-
-## 夹爪、停止和关闭力矩
-
-### `open_gripper()`
-
-- 目标角度：60°；
-- 每次最多变化 10°；
-- 每一步读取位置和负载；
-- 偏差或负载超限时保持实测位置并报错。
-
-### `close_gripper()`
-
-- 目标角度：-5°；
-- 使用与打开相同的分步、反馈和负载保护。
-
-### `stop()`
-
-`stop()` 会读取所有电机的 `Present_Position`，再写回 `Goal_Position`。
-它的含义是取消剩余轨迹并保持当前位置，力矩仍然开启。
-
-当前 `main.py` 和 `run_command()` 使用同步执行方式：当 `move_to()` 尚未
-返回时，同一个命令行输入循环无法读取新的 `stop` 命令。因此 Adapter
-底层停止能力已经实现，但当前同步 Gateway 的运动中取消能力尚未实现；
-只有另一个线程或独立真机流程调用 `stop()` 时才能中断正在执行的轨迹。
-
-### `disable_torque()`
-
-普通 `disable_torque()` 会先读取六个手臂关节，确认机械臂处于本机
-已验证的 `follower_rest` 容差内，然后才写入 `Torque_Enable = 0`，
-确认七个电机力矩均关闭，并保持 EEPROM 写锁关闭。当前位置不满足
-Rest 条件时会拒绝普通力矩释放。
-
-只有过温、过载、碰撞、人工急停，或者受控收纳本身失败时，调用方才可
-显式使用 `disable_torque(emergency=True)`。紧急释放会记录独立遥测
-阶段，并要求操作者托住机械臂。两种模式都不会重写 P/I/D。
-
-`disable_torque()` 是本地维护和真机安全收尾原子操作，默认不开放为
-Gateway/LLM 可执行 Skill。普通用户命令不能直接触发卸力；系统关闭流程
-仍可在完成 `stop()`、返回并验证 `follower_rest` 后显式调用 Adapter。
-
-### `disconnect()`
-
-`disconnect()` 只关闭 LeRobot 和串口通信，不保证关闭力矩，也不是急停。
-
-三者的区别：
-
-| 操作 | 是否保持力矩 | 机械效果 |
+| 操作 | 力矩 | 机械效果 |
 | --- | --- | --- |
-| `stop()` | 是 | 停止轨迹并保持当前位置 |
-| `disable_torque()` | 否 | 机械臂变软，可能下落 |
-| `disconnect()` | 不保证改变 | 只断开通信 |
+| `stop()` | 保持开启 | 取消剩余轨迹，把实测当前位置写回目标并保持 |
+| `disable_torque()` | 关闭 | 机械臂变软，可能受重力下落 |
+| `disconnect()` | 不保证改变 | 只关闭 LeRobot 与串口通信 |
 
-真机脚本通常采用：
+正常收尾顺序是：
 
 ```text
 stop()
-→ 受控返回并验证 follower_rest
+→ 沿已检查路径回到并验证 follower_rest
 → disable_torque()
 → disconnect()
 ```
 
-普通定位误差会先尝试沿已经检查的路径收纳。过温、过载、碰撞或人工
-急停不会为了收纳而继续运动，而是提示操作者托住机械臂并走显式紧急
-释放。软件动作不能替代物理断电或独立硬件急停。
+普通 `disable_torque()` 会先检查六个手臂关节是否处于保存的 `follower_rest` 容差内，不满足时拒绝卸力。只有过温、过载、碰撞、人工急停或正常收纳已经失败时，调用方才可在托住机械臂的前提下显式使用：
 
-## 摄像头接入
+```python
+adapter.disable_torque(emergency=True)
+```
+
+紧急卸力不是自动收纳，也不能代替物理断电。
+
+## 9. 摄像头是独立可选功能
+
+摄像头不是机械臂连接条件，也不是 Adapter 构造时的必选项。
 
 已实现：
 
 - `SO100PlusCameraConfig`；
 - `create_so100_plus_cameras()`；
-- 摄像头配置预检；
-- 独立的 `connect_cameras()` 和 `disconnect_cameras()`；
-- `capture_camera_images()`。
+- 视频设备、名称、分辨率、帧率和颜色格式预检；
+- `connect_cameras()`；
+- `capture_camera_images()`；
+- `disconnect_cameras()`；
+- 相机失败与机械臂状态隔离。
 
-当前预期参数：
+当前预期的右侧相机配置是：
 
 | 项目 | 值 |
 | --- | --- |
-| 摄像头名称 | `right` |
-| 后端 | LeRobot OpenCVCamera |
-| 图像格式 | RGB |
-| 分辨率 | 640 × 480 |
-| 帧率 | 60 FPS |
+| 名称 | `right` |
+| 后端 | LeRobot `OpenCVCamera` |
+| 默认格式 | RGB |
+| 默认分辨率 | 640 × 480 |
+| 默认帧率 | 60 FPS |
 | 输出键 | `observation.images.right` |
-| 数组布局 | HWC，`(480, 640, 3)` |
+| 数组形状 | HWC，`(480, 640, 3)` |
 
-摄像头应使用稳定的 `/dev/v4l/by-id/...-video-index0` 路径或单独的
-udev 别名，不应把实际设备序列号提交到公共仓库。
-
-机械臂和摄像头生命周期完全独立：
+生命周期可以完全分开：
 
 ```python
-adapter.connect()          # 只连接机械臂；不要求电脑插摄像头
+adapter.connect()             # 只连接机械臂
 
-# 只有需要视觉时才调用：
+# 只有需要画面时才执行：
 adapter.connect_cameras()
 images = adapter.capture_camera_images()
 adapter.disconnect_cameras()
 
-adapter.disconnect()       # 只断开机械臂
+adapter.disconnect()          # 只断开机械臂
 ```
 
-两组接口可以按任意顺序调用。摄像头连接失败只会回滚本次摄像头连接，
-不会连接、断开或改变机械臂力矩；机械臂断开后，已连接的摄像头也可继续
-抓图。完全不需要摄像头时不要创建摄像头配置即可。目前 FakeCamera
-独立生命周期测试已通过，但真实摄像头的单帧抓取尚未执行。
+也可以只连接摄像头而不连接机械臂。摄像头连接失败会回滚本次相机连接，不会断开机械臂或改变力矩；机械臂连接失败也不会擅自关闭已经连接的摄像头。
 
-## 快速开始
+建议使用稳定的 `/dev/v4l/by-id/...-video-index0` 或单独 udev 别名，不要把真实序列号提交到公共仓库。
 
-### 环境要求
+目前只完成软件接口和 FakeCamera 测试，真实摄像头单帧还没有验收，也尚未实现目标检测、相机标定、手眼标定或视觉伺服。
 
-- 推荐 Python 3.10；
-- 当前使用的 Conda 环境名为 `rosclaw-mini-py310`；
-- 默认 Mock 主链路主要使用 Python 标准库；
-- 真机需要 LeRobot、Feetech 驱动、`lerobot_kinematics`、NumPy 和 OpenCV；
-- `pyproject.toml` 和 `requirements.txt` 尚未完整声明全部真机依赖。
+## 10. Python 调用示例
 
-### 1. 进入仓库
-
-```bash
-cd rosclaw-mini
-```
-
-### 2. 激活环境
-
-```bash
-conda activate rosclaw-mini-py310
-```
-
-### 3. 启动默认 Mock 入口
-
-```bash
-PYTHONPATH=src python -m rosclaw_mini.main
-```
-
-该入口不会自动调用 LLM。它要求输入结构化 JSON。
-
-移动示例：
-
-```json
-{"skill_name": "move_arm", "params": {"x": 0.5, "y": 0.4, "z": 0.3}}
-```
-
-其他示例：
-
-```json
-{"skill_name": "open_gripper", "params": {}}
-{"skill_name": "close_gripper", "params": {}}
-{"skill_name": "stop", "params": {}}
-```
-
-输入：
-
-```text
-exit
-```
-
-即可退出。
-
-### 常见输入错误
-
-| 输入问题 | 结果 |
-| --- | --- |
-| 不是合法 JSON | 输出“LLM 输入的内容不是合法 JSON” |
-| JSON 缺少必需结构 | 输出“JSON 合法，但 Command 数据结构不合法” |
-| Skill 不存在 | 返回失败 `ExecutionResult` |
-| Skill 未启用 | 返回失败 `ExecutionResult` |
-| 缺少参数 | Validator 拒绝 |
-| 参数越界 | Safety Checker 拒绝 |
-| Adapter 异常 | Gateway 转换为失败结果 |
-
-## Python 调用示例
-
-下面的示例构造 Mock Adapter、显式工作空间和 Skill Registry，然后执行一条命令：
+### 完整 Mock 示例
 
 ```python
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
@@ -883,29 +650,28 @@ command = Command(
 )
 
 result = run_command(command, skills)
+
 print(result)
 print(adapter.position)
 ```
 
-预期结果的核心字段是：
+预期核心结果：
 
 ```text
-success=True
+result.success is True
 adapter.position == (0.5, 0.4, 0.3)
 ```
 
-如果不向 `build_arm_skills()` 传入 `workspace_limits`，`move_arm`
-会处于禁用状态：
+如果没有提供工作空间：
 
 ```python
 skills = build_arm_skills(adapter)
 assert skills["move_arm"].enabled is False
 ```
 
-这是为了防止示例工作空间被误用于真机。
+这是故意的失败关闭策略，避免把示例范围误当成真机范围。
 
-当前 `right_follower` 可以使用专用入口，自动把已登记的正式范围交给
-Skill Validator 和 Safety Checker：
+### 把正式范围交给 `right_follower` Skill
 
 ```python
 from rosclaw_mini.skills.arm_skills import (
@@ -915,306 +681,227 @@ from rosclaw_mini.skills.arm_skills import (
 skills = build_so100_plus_right_follower_arm_skills(adapter)
 ```
 
-真实 `SO100PlusAdapter` 的运动学限制应使用
-`build_so100_plus_right_follower_motion_limits(current_joint_radians)`，
-确保 Adapter 与 Skill 使用同一个工作空间。
+这个函数只把正式 `x/y/z` 边界交给 Skill、Validator 和 Safety Checker。完整真机接入还必须：
 
-## 测试
+1. 用正确串口和校准创建 Robot；
+2. 创建运动学对象；
+3. 读取当前六关节位置；
+4. 用同一正式工作空间创建 `MotionLimits`；
+5. 显式创建并连接 `SO100PlusAdapter`。
 
-### 运行全部测试
+统一入口现在会通过 `runtime.py` 完成上述装配。上面的 Skill 构造片段本身仍不等于完整真机连接；完整命令见“显式启动 SO-100 Plus”，底层构造和安全细节见 [SO-100 Plus 动作与真机接入文档](docs/arm_actions.md)。
 
-```bash
-conda activate rosclaw-mini-py310
-python -m pytest -q
-```
+## 11. 测试、仿真和真机工具
 
-当前已验证结果：
+### 默认测试覆盖
 
-```text
-233 passed
-```
+`python -m pytest -q` 当前覆盖：
 
-### 覆盖范围
+- 命令数据对象与 JSON 解析；
+- Skill 查找、启用状态和参数结构校验；
+- 通用 Safety Checker；
+- Gateway 成功和失败分支；
+- 后台执行与运动中停止；
+- Mock Adapter；
+- 工作空间、关节限制和运动限制；
+- 驱动角与模型角转换；
+- FK、IK、TCP 和路径规划；
+- SO-100 Plus Factory 与校准预检；
+- Adapter 连接、运动、夹爪、停止和卸力；
+- 30 Hz 流式轨迹、跟踪误差、负载、温度和最终到位保护；
+- 摄像头 Factory、独立生命周期和图像形状；
+- 真机启动 TCP 门禁，以及工作区外 `move_arm` 不会调用 Adapter；
+- 仿真工作空间扫描器与真机脚本参数保护。
 
-默认测试覆盖：
-
-- Command、SafetyResult 和 ExecutionResult；
-- SkillDefinition 和 ParamSpec；
-- Skill Registry；
-- JSON 命令解析；
-- Validator；
-- Safety Checker；
-- Gateway 正常和失败分支；
-- ArmHandlers；
-- MockArmAdapter；
-- WorkspaceLimits、JointLimits 和 MotionLimits；
-- SO-100 Plus 驱动角与模型角转换；
-- FK、IK、TCP 和轨迹拆分；
-- SO-100 Plus factory 和校准预检；
-- SO100PlusAdapter 连接、运动、夹爪、停止和关力矩；
-- 流式轨迹、跟踪误差和遥测保护；
-- 摄像头 factory、独立生命周期和图像形状；
-- 百万姿态工作空间扫描器的范围换算、TCP 和碰撞过滤；
-- JoyCon 初始工作姿态笛卡尔网格、路径检查和连通候选框；
-- 真机脚本的参数保护。
-
-默认测试使用 FakeRobot、FakeBus 和 FakeCamera，不会：
+默认测试不会：
 
 - 打开 `/dev/lerobot_right`；
 - 启用真实电机力矩；
 - 移动真实机械臂；
-- 打开真实 USB 摄像头。
+- 修改校准或 PID EEPROM；
+- 打开 `/dev/video*`。
 
-## 手动真机验证
+### 仿真与预览工具
 
-> 本节命令会触碰真实硬件。只有操作者站在机械臂旁边、工作空间清空、
-> 能够立即物理断电，并已理解脚本行为时才能执行。
+| 工具 | 用途 | 是否接触真机 |
+| --- | --- | --- |
+| `scripts/simulate_so100_plus_workspace.py` | 百万姿态离线采样与 MuJoCo 碰撞过滤 | 否 |
+| `scripts/simulate_so100_plus_rest_workspace.py` | JoyCon 初始姿态附近 IK 网格与相邻路径检查 | 否 |
+| `scripts/preview_so100_plus_local_grid.py` | 预览局部候选网格 | 否 |
+| `scripts/preview_so100_plus_mujoco_z.py` | 生成 MuJoCo 方向预览 | 否 |
+| `scripts/view_so100_plus_mujoco_z.py` | 打开 MuJoCo UI，观察姿态、TCP 与 +Z | 否 |
 
-真机脚本位于 `scripts/`，不会被普通 `pytest` 调用。脚本需要显式传入：
+仿真可以排除明显不可达或碰撞的候选，但不能模拟教学版机械臂的回差、重力下垂、线缆、电流、温度和装配误差，因此仿真范围不能直接等于真机安全范围。
 
-- 串口；
-- 校准目录；
-- follower 名称；
-- 对应的 `--acknowledge-...-risk` 参数。
+### 真机工具
 
-共用环境：
+真机脚本不会被默认 pytest 调用，并要求显式风险确认：
 
-```bash
-conda activate rosclaw-mini-py310
-export PYTHONPATH=src:lerobot-joycon_plus
-export MPLCONFIGDIR=/tmp/matplotlib-rosclaw
-```
+| 工具 | 用途 | 主要风险 |
+| --- | --- | --- |
+| `check_so100_plus_connection.py` | 正式连接和位置/遥测检查 | 上力、写运行参数 |
+| `check_so100_plus_adapter_gripper.py` | 夹爪开合 | 夹持、堵转 |
+| `check_so100_plus_adapter_stop.py` | 验证保持当前位置 | 上力、轻微移动 |
+| `check_so100_plus_adapter_move_to.py` | 局部笛卡尔运动 | 多关节真实运动 |
+| `check_so100_plus_base_joint_motion.py` | 底座关节诊断 | 底座碰撞、线缆拉扯 |
+| `check_so100_plus_candidate_workspace.py` | Rest 展开、代表点和收纳 | 多点连续运动 |
+| `tune_so100_plus_pid.py` | 有限轮 PID A/B 调参 | 运动并写 PID EEPROM |
+| `check_so100_plus_camera.py` | 单独抓取相机帧 | 打开真实摄像头，不动机械臂 |
 
-局部向上 1 cm 的示例：
+不要为了“确认文档还有效”而重复已经完成的边界套件或 PID 调参。确需复验时，先阅读脚本帮助和 [真机文档](docs/arm_actions.md)，先做只读/离线预检，再决定是否执行硬件模式。
 
-```bash
-python scripts/check_so100_plus_adapter_move_to.py \
-  --port /dev/lerobot_right \
-  --calibration-dir lerobot-joycon_plus/.cache/calibration/so100_plus \
-  --follower-name right \
-  --delta-z-cm 1 \
-  --runtime-acceleration 35 \
-  --single-cartesian-plan \
-  --stream-frequency-hz 20 \
-  --stream-max-joint-speed-degrees-per-second 20 \
-  --acknowledge-move-to-risk
-```
-
-这个命令会连接机械臂、启用力矩并产生真实运动。它只验证当前起点附近的一条
-局部路径，不代表任意起点都可以安全上移。
-
-候选工作空间的一次性边界套件先运行只读预检：
-
-```bash
-python scripts/check_so100_plus_candidate_workspace.py \
-  --port /dev/lerobot_right \
-  --calibration-dir lerobot-joycon_plus/.cache/calibration/so100_plus \
-  --follower-name right \
-  --boundary-suite \
-  --preflight-only
-```
-
-这个模式依次离线复核原有 4 个内部往返点，以及距候选框六个面和八个角
-各 `1 cm` 的 14 个代表点；加上最终返回初始姿态，共 19 个检查点。
-真机模式会在一次运行中执行相同顺序，最后必须返回并验证
-`follower_rest` 才正常断开力矩。只读预检通过并清空现场后，才可把
-`--preflight-only` 换为
-`--acknowledge-candidate-workspace-motion-risk`。
-
-有限轮 PID 脚本必须先从关闭力矩的 `follower_rest` 运行只读预检：
-
-```bash
-python scripts/tune_so100_plus_pid.py \
-  --port /dev/lerobot_right \
-  --calibration-dir lerobot-joycon_plus/.cache/calibration/so100_plus \
-  --follower-name right \
-  --preflight-only
-```
-
-确认预检、现场路径和 EEPROM 风险后，才把 `--preflight-only` 换成
-`--acknowledge-bounded-pid-eprom-tuning-risk`。完整候选、动作上限、
-停止条件和硬件命令见
-[SO-100 Plus 动作与真机接入文档](docs/arm_actions.md#136-有限轮-pid-自动调参)。
-
-连接、夹爪、`stop()`、底座关节、肘关节 P 和摄像头分别有独立检查脚本。
-运行前请阅读：
-
-[SO-100 Plus 动作、坐标、安全配置和真机验证文档](docs/arm_actions.md)
-
-## 已经完成的真机验证
+## 12. 已经完成的真机验证
 
 当前这台 `right_follower` 已完成：
 
-- 确认 `/dev/lerobot_right` 指向实际 follower 串口；
-- 检查并加载 `right_follower.json`；
-- 读取七个电机的真实位置；
-- 验证夹爪打开和关闭；
-- 验证 `stop()` 保持当前位置；
-- 验证 `disable_torque()` 关闭力矩；
-- 手动选择安装底座后的底座旋转范围；
+- 确认型号为 SO-100 Plus；
+- 确认 `/dev/lerobot_right` 对应实际 follower 串口；
+- 确认使用 `right_follower.json`；
+- 读取七个电机的真实位置和遥测；
+- 验证夹爪打开、关闭和负载保护；
+- 验证 `stop()` 取消剩余动作并保持当前位置；
+- 验证普通卸力需要 `follower_rest`，以及显式紧急卸力路径；
+- 人工选择安装底座后的底座旋转范围；
 - 比较肘关节 P=32、48、64，最终保存 P=64；
-- 用固定关节目标完成 I/D 最终 A/B，保存主要跟踪关节 I=2、D=32；
+- 固定目标比较 PID 候选，保存已调关节 I=2、D=32；
 - 多次执行局部 `move_to()`；
-- 在 MuJoCo 中分别检查 follower_rest 收纳姿态、JoyCon 初始工作姿态、
-  TCP 标记和 +Z 方向；
+- 在 MuJoCo 中检查收纳姿态、JoyCon 初始姿态、TCP 标记和 +Z 方向；
+- 完成正式工作空间 14 个内缩边界代表点；
 - 记录运动中的位置、电压、电流、负载和温度。
 
-三次有代表性的 +Z 10 cm 结果：
+三次有代表性的局部 +Z 10 cm 验证：
 
-| 方式 | 实际累计 Z 变化 | 最终 TCP 误差 | 结论 |
+| 执行方式 | 实际累计 Z 变化 | 最终 TCP 误差 | 当次结论 |
 | --- | ---: | ---: | --- |
-| 分段计划 | 约 9.869 cm | 约 1.742 mm | 通过当次局部验证 |
-| 单次笛卡尔计划 | 约 9.743 cm | 约 2.804 mm | 通过当次局部验证 |
-| 20 Hz 流式计划 | 约 10.144 cm | 约 8.378 mm | 旧温升规则触发，不计精度通过 |
+| 分段计划 | 约 9.869 cm | 约 1.742 mm | 通过局部验证 |
+| 单次笛卡尔计划 | 约 9.743 cm | 约 2.804 mm | 通过局部验证 |
+| 20 Hz 流式计划 | 约 10.144 cm | 约 8.378 mm | 被旧温升规则中止，不计精度通过 |
 
-这些结果只说明当时的起点、姿态、负载和路径能够执行，不证明：
+这些结果只能说明当时起点、姿态、路径和负载条件下可以执行，不证明：
 
-- 整个理论工作空间都安全；
-- 任意方向都能达到相同误差；
-- 携带物体后仍能达到相同结果；
-- 初级教学版机械臂具备工业机械臂精度。
+- 整个理论工作空间都达到同样精度；
+- 任意方向或任意夹爪姿态都可达；
+- 抓取物体后仍保持相同误差；
+- 教学版机械臂具备工业机械臂精度；
+- 软件保护能识别人体、桌面边缘或未知障碍物。
 
-## 项目结构
+## 13. 项目结构
 
 ```text
 rosclaw-mini/
 ├── README.md
-├── pyproject.toml                    # pytest 基础配置，依赖尚未补全
-├── requirements.txt                 # 尚未完整声明真机依赖
+├── pyproject.toml                     # 当前主要是 pytest 配置
+├── requirements.txt                  # 真机依赖尚未完整声明
 ├── configs/
-│   ├── default.yaml                 # 当前未接入主链路
-│   ├── safety_limits.yaml           # 当前未接入主链路
-│   └── skills.yaml                  # 当前未接入主链路
+│   ├── default.yaml                  # 空，尚未接入
+│   ├── safety_limits.yaml            # 空，尚未接入
+│   └── skills.yaml                   # 空，尚未接入
 ├── docs/
-│   ├── arm_actions.md               # SO-100 Plus 详细真机文档
+│   ├── arm_actions.md                # 真机动作、配置、命令和验证细节
 │   ├── so100_plus_simulated_workspace.md
-│   │                                # 仿真候选工作空间方法与结果
-│   ├── demo_examples.md
+│   ├── workspace_limits.md
 │   ├── joint_limits.md
 │   ├── safety_rules.md
-│   └── workspace_limits.md
+│   └── demo_examples.md
 ├── scripts/
-│   ├── check_so100_plus_*.py        # 需要显式风险确认的真机检查
-│   ├── simulate_so100_plus_workspace.py
-│   │                                # 纯离线工作空间扫描
-│   ├── simulate_so100_plus_rest_workspace.py
-│   │                                # JoyCon 初始工作姿态 IK 和路径网格
-│   ├── check_so100_plus_candidate_workspace.py
-│   │                                # 收纳 Rest 展开、内点验证和收回
-│   ├── preview_so100_plus_*.py      # 纯计算或离线预览
-│   ├── view_so100_plus_mujoco_z.py  # MuJoCo UI 预览
-│   └── run_*.py                     # 早期运行脚本
-├── src/rosclaw_mini/
-│   ├── main.py                      # 默认 Mock JSON 入口
-│   ├── command_schema/
-│   │   └── commands.py              # Command / SafetyResult / ExecutionResult
-│   ├── skills/
-│   │   ├── base.py                  # ParamSpec / SkillDefinition
-│   │   ├── registry.py              # Skill 查找
-│   │   ├── validator.py             # 参数结构校验
-│   │   ├── arm_skills.py            # 五个机械臂 Skill
-│   │   └── arm_handler.py           # Skill 到 Adapter 的映射
-│   ├── safety/
-│   │   ├── checker.py               # 通用 ParamSpec 安全检查
-│   │   ├── limits.py                # 工作空间和关节限制
-│   │   └── risk_policy.py           # 后续风险策略骨架
-│   ├── gateway/
-│   │   └── command/gateway.py       # 命令执行编排
-│   ├── arm/
-│   │   ├── base.py                  # ArmAdapter 抽象接口
-│   │   ├── mock_arm.py              # Mock 后端
-│   │   ├── so100_plus.py            # SO-100 Plus Adapter 和运行保护
-│   │   ├── so100_plus_factory.py    # 机器人、校准和摄像头 factory
-│   │   ├── so100_plus_diagnostics.py# 遥测与诊断辅助
-│   │   └── kinematics.py            # FK、IK、TCP 和轨迹
-│   ├── llm/                         # 仅有确定性解析器和占位文件
-│   ├── rag/                         # 尚未接入
-│   ├── ros2/                        # 尚未接入
-│   ├── web/                         # 尚未接入
-│   ├── state/                       # 尚未接入
-│   ├── logging/                     # 尚未接入
-│   └── evaluation/                  # 尚未接入
-├── tests/                           # 默认全部为无硬件测试
+│   ├── check_so100_plus_*.py         # 带显式确认的真机检查
+│   ├── tune_so100_plus_pid.py        # 有限轮 EEPROM PID 调参
+│   ├── simulate_so100_plus_*.py      # 纯离线工作空间仿真
+│   ├── preview_so100_plus_*.py       # 离线预览
+│   └── view_so100_plus_mujoco_z.py   # MuJoCo UI
 ├── artifacts/
-│   ├── so100_plus_workspace/        # 所有姿态仿真点云、报告和图片
-│   └── so100_plus_rest_workspace/   # 初始工作姿态网格（旧目录名）
-└── lerobot-joycon_plus/             # 独立 LeRobot fork 和校准缓存
+│   ├── so100_plus_workspace/         # 全姿态仿真报告、点云和图片
+│   └── so100_plus_rest_workspace/    # 初始姿态附近网格结果；保留旧目录名
+├── src/rosclaw_mini/
+│   ├── main.py                       # 默认 Mock JSON 入口
+│   ├── runtime.py                    # Mock/真机 Adapter、Skills、Controller 装配与关闭
+│   ├── command_schema/               # Command / SafetyResult / ExecutionResult
+│   ├── execution/                    # 后台执行和 stop 调度
+│   ├── gateway/                      # 命令执行编排
+│   ├── skills/                       # Skill 定义、查找、校验和 Handler
+│   ├── safety/                       # Checker、工作空间、关节和运动限制
+│   ├── arm/                          # Mock、SO100Plus、Factory、运动学和诊断
+│   ├── llm/                          # 当前只有确定性解析器和占位代码
+│   ├── rag/                          # 尚未接入
+│   ├── ros2/                         # 尚未接入
+│   ├── web/                          # 尚未接入
+│   ├── state/                        # 尚未接入
+│   ├── logging/                      # 尚未接入
+│   └── evaluation/                   # 尚未接入
+├── tests/                            # 默认无硬件测试
+└── lerobot-joycon_plus/              # 独立 LeRobot fork 与校准缓存
 ```
 
-### 核心文件职责
+### 关键文件职责
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/rosclaw_mini/main.py` | 读取 JSON 并运行默认 Mock 链路 |
-| `src/rosclaw_mini/gateway/command/gateway.py` | 编排 Skill 查询、校验、安全检查和执行 |
-| `src/rosclaw_mini/skills/arm_skills.py` | 定义五个内置机械臂 Skill |
-| `src/rosclaw_mini/skills/arm_handler.py` | 把 Skill 映射到 Adapter 原子动作 |
-| `src/rosclaw_mini/safety/checker.py` | 根据 ParamSpec 检查命令 |
-| `src/rosclaw_mini/safety/limits.py` | 定义工作空间、关节和运动限制 |
-| `src/rosclaw_mini/arm/base.py` | 定义统一 ArmAdapter |
-| `src/rosclaw_mini/arm/mock_arm.py` | 提供无硬件 Mock 实现 |
-| `src/rosclaw_mini/arm/so100_plus.py` | 提供真实 Adapter、轨迹和运行保护 |
-| `src/rosclaw_mini/arm/so100_plus_factory.py` | 创建 Robot/Camera 并进行连接前预检 |
-| `src/rosclaw_mini/arm/kinematics.py` | 实现 SO-100 Plus FK、IK、TCP 和路径规划 |
-| `docs/arm_actions.md` | 记录真机坐标、安全参数、命令和验证结果 |
-| `scripts/simulate_so100_plus_workspace.py` | 离线采样并过滤仿真候选工作空间 |
-| `scripts/simulate_so100_plus_rest_workspace.py` | 扫描 JoyCon 初始工作姿态网格和相邻路径（保留旧文件名） |
-| `scripts/check_so100_plus_candidate_workspace.py` | 从本机 follower_rest 展开；可验证进出通道、内部点或一次性六面/八角边界套件，并安全收回 |
-| `docs/so100_plus_simulated_workspace.md` | 解释工作空间扫描方法、结果和边界 |
+| `src/rosclaw_mini/main.py` | 解析启动参数并运行 JSON 交互入口；默认 Mock |
+| `src/rosclaw_mini/runtime.py` | 装配 Mock/真机 Adapter、Skills、Controller，并执行 stop→disconnect 关闭 |
+| `src/rosclaw_mini/execution/controller.py` | 后台运行一个普通命令，并允许独立 stop 请求 |
+| `src/rosclaw_mini/gateway/command/gateway.py` | 编排 Skill 查找、校验、安全检查和执行 |
+| `src/rosclaw_mini/skills/arm_skills.py` | 定义五个机械臂 Skill 和正式 right-follower 构造函数 |
+| `src/rosclaw_mini/skills/arm_handler.py` | 把 Skill 映射到 Adapter 原子操作 |
+| `src/rosclaw_mini/safety/checker.py` | 通用读取 `ParamSpec` 检查命令 |
+| `src/rosclaw_mini/safety/limits.py` | 工作空间、关节限制、运动限制和正式真机范围 |
+| `src/rosclaw_mini/arm/base.py` | 定义统一 `ArmAdapter` |
+| `src/rosclaw_mini/arm/mock_arm.py` | 无硬件 Mock 实现 |
+| `src/rosclaw_mini/arm/so100_plus.py` | 真机 Adapter、运行配置、轨迹和保护 |
+| `src/rosclaw_mini/arm/so100_plus_factory.py` | Robot/Camera 构造和连接前预检 |
+| `src/rosclaw_mini/arm/kinematics.py` | 驱动角转换、FK、IK、TCP 和纯数值路径 |
+| `docs/arm_actions.md` | 真机命令、风险、配置来源和实验记录 |
+| `docs/so100_plus_simulated_workspace.md` | 工作空间仿真方法、产物和边界解释 |
 
-## 当前边界
+## 14. 当前限制和下一步
 
-### 真机控制
+### 当前限制
 
-- `main.py` 还没有 `mock/so100_plus` 后端选择，普通入口不能直接使用真机；
-- 已登记固定 JoyCon 初始 TCP 姿态附近的 `12 × 6 × 12 cm` 正式可达工作空间，但任意姿态的全局 XYZ 工作空间仍未认证；
-- 已有百万姿态仿真候选点云，但其外包围盒不是安全长方体；
-- 原 `14 × 8 × 14 cm` 候选框的14个内缩边界代表点已全部真机测试；正式范围采用内缩后的 `12 × 6 × 12 cm`，其中两个位置不保证 `12 mm` 精度；
-- 除底座旋转外，其余关节尚未逐一完成物理边界认证；
-- `move_to()` 只保持当前姿态，不支持显式 roll/pitch/yaw；
-- `SO100PlusAdapter.move_joints()` 已支持受限六关节姿态移动，但尚未映射为上层 Skill；
-- 没有碰撞模型、视觉避障或独立硬件急停接口；
-- 当前保护不能识别桌面、底座、人体或线缆碰撞；
-- 教学版机械臂存在回差、重力下垂和精度波动。
+真机控制：
 
-### 摄像头
+- 真机入口仍要求操作者在场并显式确认风险，不适合无人值守；
+- 统一入口尚未实现经过验证的 `follower_rest → 工作区` 自动展开流程；
+  启动 TCP 在正式范围外时会保留连接，但禁用 `move_arm`；
+- 启动门禁检查 TCP 位置，不等于验证完整末端姿态、环境障碍物或人员；
+- 正式工作空间只覆盖当前固定姿态邻域，不是任意姿态的全局空间；
+- 除底座外，其余关节没有逐一完成当前安装条件下的物理边界认证；
+- `move_to()` 不能显式指定 roll、pitch、yaw；
+- `move_joints()` 是 Adapter 专用能力，尚未成为上层 Skill；
+- 没有生产级碰撞检测、视觉避障或独立硬件急停接口；
+- 软件不能识别人体、线缆、未知障碍物和桌面边缘；
+- 教学版机械臂存在回差、重力下垂、轻微抖动和精度波动。
 
-- 摄像头软件接口已经实现；
-- FakeCamera 测试已经通过；
-- 真实摄像头单帧尚未抓取；
-- 摄像头与机械臂已经在软件上解耦，可分别连接和断开；
-- 还没有目标检测、标定、手眼标定或视觉伺服。
+摄像头：
 
-### 工程化
+- 软件生命周期已与机械臂解耦；
+- 真实单帧尚未验收；
+- 没有目标检测、相机内参、手眼标定和视觉闭环。
 
-- `configs/*.yaml` 尚未接入实际主链路；
-- `requirements.txt` 和 `pyproject.toml` 尚未声明完整依赖；
-- 当前真机运行仍依赖 `PYTHONPATH=src:lerobot-joycon_plus`；
-- 没有完整的安装包、版本发布或 Docker 真机环境；
-- 没有统一的结构化运行日志和任务恢复机制。
+工程化：
 
-### 智能化和外部接口
+- `configs/*.yaml` 为空且未接入；
+- Python 和真机依赖未完整声明；
+- 当前真机工具仍依赖本地 Conda 环境和 `PYTHONPATH`；
+- 没有统一结构化运行日志、任务持久化和故障恢复；
+- LLM、RAG、Web、ROS 2 只是目标或目录占位，不是已完成功能。
 
-- `main.py` 接受 JSON，不调用大语言模型；
-- LLM、RAG、Web 和 ROS 2 目录尚未形成可用链路；
-- 当前没有自然语言到高层任务的可靠规划；
-- 当前没有用户权限、审批或风险等级动态授权机制。
+### 建议的下一步顺序
 
-## 建议的下一步
+1. 把串口、follower、校准和正式工作空间接入 `configs/*.yaml`，保留命令行覆盖；
+2. 补全可复现的 Python/Conda 安装说明和依赖声明；
+3. 为统一入口设计并单独验收 `follower_rest → 工作区 → follower_rest`
+   的显式转换动作，再考虑开放工作区外启动后的 `move_arm`；
+4. 单独完成真实摄像头一帧验证，不要求机械臂同时连接；
+5. 增加统一结构化遥测日志和运行报告；
+6. 根据实际工位增加底座、桌面、线缆和障碍物模型；
+7. 在底层真机入口稳定后，再接入复杂 Skill、Web、ROS 2、LLM 或 RAG。
 
-1. 为 `main.py` 增加显式 `mock/so100_plus` 后端选择，并保持 Mock 为默认值；
-2. 把经过实机确认的工作空间配置接入 Skill 和 Gateway；
-3. 补全 `pyproject.toml`、`requirements.txt` 和可复现安装流程；
-4. 完成真实摄像头单帧验证；
-5. 标定相机坐标系、机械臂底座坐标系和 TCP 之间的关系；
-6. 根据真实工位增加碰撞区域、底座和线缆限制；
-7. 在真机底层链路稳定后，再接入 Web、ROS 2、LLM 或 RAG。
+这里的优先级是先把“现有真机能力变成可重复配置和启动的应用”，再扩展智能化功能。
 
-## 延伸文档
+## 15. 延伸文档
 
 - [SO-100 Plus 动作、坐标、安全配置与真机验证](docs/arm_actions.md)
 - [SO-100 Plus 仿真候选工作空间](docs/so100_plus_simulated_workspace.md)
-- [安全规则](docs/safety_rules.md)
+- [正式工作空间限制](docs/workspace_limits.md)
 - [关节限制](docs/joint_limits.md)
-- [工作空间限制](docs/workspace_limits.md)
+- [安全规则](docs/safety_rules.md)
 - [演示示例](docs/demo_examples.md)
