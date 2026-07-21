@@ -96,10 +96,12 @@ def test_stop_interrupts_running_move():
     stop_command = make_stop_command("stop-running")
 
     accepted = controller.submit(move_command)
-    stop_result = controller.request_stop(stop_command)
-    move_result = controller.wait(timeout=0.5)
 
     assert accepted is True
+    assert adapter.wait_until_moving(timeout=0.5) is True
+
+    stop_result = controller.request_stop(stop_command)
+    move_result = controller.wait(timeout=0.5)
 
     assert stop_result.success is True
     assert stop_result.skill_name == "stop"
@@ -109,7 +111,7 @@ def test_stop_interrupts_running_move():
     assert move_result is not None
     assert move_result.success is False
     assert move_result.skill_name == "move_arm"
-    assert "中断" in move_result.message
+    assert "停止" in move_result.message
 
     # 被中断后不能把目标位置记录为已经到达。
     assert adapter.position is None
@@ -138,6 +140,7 @@ def test_next_move_succeeds_after_interrupted_move():
     stop_command = make_stop_command("stop-first")
 
     assert controller.submit(first_move) is True
+    assert adapter.wait_until_moving(timeout=0.5) is True
 
     stop_result = controller.request_stop(stop_command)
     first_result = controller.wait(timeout=0.5)
@@ -193,4 +196,3 @@ def test_stop_while_idle_does_not_interrupt_next_move():
 
     assert adapter.position == (0.5, 0.4, 0.3)
     assert adapter.is_stopped is False
-    
