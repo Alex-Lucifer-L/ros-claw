@@ -83,38 +83,6 @@ def test_submit_rejects_second_command_while_running():
     allow_motion_finish.set()
     controller.wait(timeout=1.0)
 
-def test_submit_rejects_second_command_while_running():
-    motion_started = Event()
-    allow_motion_finish = Event()
-
-    def fake_runner(command: Command) -> ExecutionResult:
-        motion_started.set()
-        allow_motion_finish.wait(timeout=1.0)
-
-        return ExecutionResult(
-            command_id=command.command_id,
-            skill_name=command.skill_name,
-            success=True,
-            message="动作完成",
-        )
-
-    controller = ExecutionController(fake_runner)
-
-    first_accepted = controller.submit(
-        make_command(command_id="cmd-001")
-    )
-
-    assert motion_started.wait(timeout=1.0) is True
-
-    second_accepted = controller.submit(
-        make_command(command_id="cmd-002")
-    )
-
-    assert first_accepted is True
-    assert second_accepted is False
-
-    allow_motion_finish.set()
-    controller.wait(timeout=1.0)
 
 def test_request_stop_runs_while_background_command_is_active():
     motion_started = Event()
