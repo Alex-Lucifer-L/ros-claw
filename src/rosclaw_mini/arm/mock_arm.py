@@ -12,7 +12,7 @@ class MockArmAdapter(ArmAdapter):
     它只通过修改内部状态，模拟机械臂已经执行了操作。
     """
 
-    def __init__(self):
+    def __init__(self,move_duration_seconds: float = 0.0):
 
         self._is_connected: bool = False  # 模拟机械臂连接状态。
         # 模拟夹爪 TCP 在机械臂底座坐标系中的绝对位置。
@@ -26,6 +26,7 @@ class MockArmAdapter(ArmAdapter):
         self.is_stopped: bool = False
         self.torque_enabled: bool = False
         self._stop_event: Event = Event()  # 用于模拟停止命令的事件标志。
+        self.move_duration_seconds = move_duration_seconds  # 模拟移动操作的持续时间。
 
 
     @property
@@ -53,8 +54,15 @@ class MockArmAdapter(ArmAdapter):
         z: float,
     ) -> None:
         # 模拟 TCP 移动：不控制硬件，只记录新的目标位置。
+        stop_requested = self._stop_event.wait(timeout=self.move_duration_seconds)
+        if stop_requested:
+            # 如果在移动过程中收到了停止命令，模拟停止操作。
+            self.is_stopped = True
+            self._stop_event.clear()  # 重置停止事件，以便下次移动操作可以正常进行。
+            raise RuntimeError("移动操作被停止。")
         self.position = (x, y, z)
         self.is_stopped = False
+
 
     def open_gripper(self) -> None:
         # 模拟打开夹爪。
@@ -67,6 +75,7 @@ class MockArmAdapter(ArmAdapter):
     def stop(self) -> None:
         # 模拟停止机械臂。
         self.is_stopped = True
+        self._stop_event.set()  # 设置停止事件，通知正在进行的操作停止。
 
     def disable_torque(self, *, emergency: bool = False) -> None:
         # 模拟关闭全部关节力矩。

@@ -8,7 +8,7 @@ import uuid
 import json
 
 def main():
-    adapter = MockArmAdapter()
+    adapter = MockArmAdapter(move_duration_seconds=5.0)
     # 这里只供 Mock 演示使用，不代表真实 SO-100 Plus 的安全工作空间。
     mock_workspace = WorkspaceLimits(
         x=AxisLimits(-1.0, 1.0),
