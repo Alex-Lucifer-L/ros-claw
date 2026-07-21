@@ -26,11 +26,12 @@ def main():
                 print("当前有命令正在执行，请等待其完成或使用 stop 命令停止它。")
                 continue
             print("退出程序。")
+            break
         if command=="result":
-           if controller._running:
+           if controller.is_running():
                print("命令正在执行中，请等待其完成。")
            else:
-               result = controller._last_result
+               result = controller.last_result()
                if result is not None:
                    print(f"上一次命令执行结果: {result}")
                else:

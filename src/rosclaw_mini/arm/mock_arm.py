@@ -1,5 +1,5 @@
 from rosclaw_mini.arm.base import ArmAdapter
-
+from threading import Event
 
 
 class MockArmAdapter(ArmAdapter):
@@ -25,6 +25,9 @@ class MockArmAdapter(ArmAdapter):
         # 模拟机械臂是否执行了停止命令。
         self.is_stopped: bool = False
         self.torque_enabled: bool = False
+        self._stop_event: Event = Event()  # 用于模拟停止命令的事件标志。
+
+
     @property
     def is_connected(self) -> bool:
         # 返回模拟的机械臂连接状态。
