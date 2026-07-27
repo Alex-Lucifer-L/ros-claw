@@ -160,6 +160,19 @@ def main(
     shutdown_error: Exception | None = None
     try:
         output_func(f"当前后端: {args.backend}")
+        session_state = getattr(runtime, "session_state", None)
+        if session_state is not None:
+            output_func(f"SO-100 Plus 会话状态: {session_state.value}")
+            if session_state.value == "REST":
+                output_func(
+                    "已认证为 follower_rest；可执行 unfold_arm，"
+                    "普通 move_arm 保持禁用。"
+                )
+            elif session_state.value == "WORK":
+                output_func(
+                    "已认证为 JoyCon 工作初始姿态；"
+                    "可在正式工作空间内执行工作动作。"
+                )
         if runtime.current_tcp_position_m is not None:
             position = ", ".join(
                 f"{value:.6f}"
@@ -177,6 +190,9 @@ def main(
         output_func("\n收到 Ctrl+C，正在停止并断开连接。")
         exit_code = 130
     finally:
+        exit_pose_warning = getattr(runtime, "exit_pose_warning", None)
+        if exit_pose_warning is not None:
+            output_func(exit_pose_warning)
         try:
             runtime.shutdown()
         except Exception as error:

@@ -1,8 +1,11 @@
 # 这个文件定义了机械臂技能的参数规范和技能定义，包括移动机械臂、打开和关闭机械爪以及停止机械臂动作的技能。
 
+from dataclasses import replace
+
 from rosclaw_mini.skills.base import ParamSpec, SkillDefinition
 from rosclaw_mini.skills.arm_handler import ArmHandlers
 from rosclaw_mini.arm.base import ArmAdapter
+from rosclaw_mini.arm.so100_plus_session import SO100PlusArmSession
 from rosclaw_mini.safety.limits import (
     AxisLimits,
     SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
@@ -99,10 +102,71 @@ def build_arm_skills(
 
 def build_so100_plus_right_follower_arm_skills(
     adapter: ArmAdapter,
+    *,
+    session: SO100PlusArmSession | None = None,
 ) -> dict[str, SkillDefinition]:
     """用已登记的 right_follower 工作空间构建真机 Skill。"""
 
-    return build_arm_skills(
+    skills = build_arm_skills(
         adapter,
         workspace_limits=SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
     )
+    if session is None:
+        return skills
+    return bind_so100_plus_arm_session(skills, session)
+
+
+def bind_so100_plus_arm_session(
+    skills: dict[str, SkillDefinition],
+    session: SO100PlusArmSession,
+) -> dict[str, SkillDefinition]:
+    """把动态会话门禁绑定到现有 right_follower Skill 注册表。"""
+
+    required = ("move_arm", "open_gripper", "close_gripper", "stop")
+    missing = tuple(name for name in required if name not in skills)
+    if missing:
+        raise RuntimeError(
+            "right_follower Skill 注册表缺少："
+            + ", ".join(missing)
+            + "。"
+        )
+    skills = dict(skills)
+    skills["move_arm"] = replace(
+        skills["move_arm"],
+        handler=session.move_arm,
+    )
+    skills["open_gripper"] = replace(
+        skills["open_gripper"],
+        handler=session.open_gripper,
+    )
+    skills["close_gripper"] = replace(
+        skills["close_gripper"],
+        handler=session.close_gripper,
+    )
+    skills["stop"] = replace(
+        skills["stop"],
+        handler=session.stop,
+    )
+    skills["unfold_arm"] = SkillDefinition(
+        skill_name="unfold_arm",
+        description=(
+            "沿已认证的 follower_rest → storage_escape → "
+            "JoyCon 工作初始姿态路径展开机械臂"
+        ),
+        risk_level="high",
+        enabled=True,
+        params_schema={},
+        handler=session.unfold_arm,
+    )
+    skills["fold_arm"] = SkillDefinition(
+        skill_name="fold_arm",
+        description=(
+            "先返回 JoyCon 工作初始姿态，再沿已认证反向路径"
+            "收纳到 follower_rest"
+        ),
+        risk_level="high",
+        enabled=True,
+        params_schema={},
+        handler=session.fold_arm,
+    )
+    return skills

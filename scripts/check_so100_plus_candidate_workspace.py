@@ -41,6 +41,16 @@ from rosclaw_mini.arm.so100_plus_factory import (
     create_so100_plus_readonly_robot,
     create_so100_plus_robot,
 )
+from rosclaw_mini.arm.so100_plus_session import (
+    SO100_PLUS_STORAGE_ESCAPE_FRACTION,
+    SO100_PLUS_WORK_INITIAL_MAX_JOINT_ERROR_DEGREES,
+    SO100_PLUS_WORK_INITIAL_MAX_TCP_ERROR_M,
+    SO100PlusPoseSnapshot as PoseSnapshot,
+    build_so100_plus_storage_transition,
+    read_so100_plus_pose_snapshot as _read_pose_snapshot,
+    validate_storage_rest_start,
+    validate_work_initial_pose,
+)
 from rosclaw_mini.safety.limits import (
     AxisLimits,
     MotionLimits,
@@ -80,11 +90,13 @@ EXPECTED_STORAGE_REST_DRIVER_DEGREES = (
 STORAGE_REST_DRIVER_TOLERANCES_DEGREES = (
     SO100_PLUS_REAL_HARDWARE_PROFILE.storage_rest_tolerances_degrees
 )
-MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0
-MAX_INITIAL_TCP_ERROR_M = 0.03
+MAX_INITIAL_JOINT_ERROR_DEGREES = (
+    SO100_PLUS_WORK_INITIAL_MAX_JOINT_ERROR_DEGREES
+)
+MAX_INITIAL_TCP_ERROR_M = SO100_PLUS_WORK_INITIAL_MAX_TCP_ERROR_M
 MAX_JOINT_STEP_RADIANS = math.radians(2.0)
 SIMULATION_STEP_RADIANS = math.radians(1.0)
-ESCAPE_FRACTION = 0.20
+ESCAPE_FRACTION = SO100_PLUS_STORAGE_ESCAPE_FRACTION
 TRANSITION_WORKSPACE_MARGIN_M = 0.005
 TRANSITION_FINAL_JOINT_TOLERANCE_DEGREES = 3.0
 TRANSITION_FINAL_TCP_TOLERANCE_M = 0.012
@@ -122,14 +134,6 @@ class WorkspaceCandidate:
 class ValidationCheckpoint:
     name: str
     position_m: tuple[float, float, float]
-
-
-@dataclass(frozen=True)
-class PoseSnapshot:
-    driver_degrees: tuple[float, ...]
-    joint_radians: tuple[float, ...]
-    tcp_position_m: tuple[float, float, float]
-    torque_enabled: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -469,50 +473,6 @@ def validate_checkpoint_suite_offline(
     )
 
 
-def validate_storage_rest_start(
-    snapshot: PoseSnapshot,
-    *,
-    require_torque_disabled: bool = True,
-) -> float:
-    if require_torque_disabled and any(snapshot.torque_enabled):
-        raise RuntimeError(
-            f"只读预检发现力矩仍开启：{snapshot.torque_enabled}；"
-            "已停止，未发送任何写命令。"
-        )
-    joint_errors = tuple(
-        abs(actual - expected)
-        for actual, expected in zip(
-            snapshot.driver_degrees,
-            EXPECTED_STORAGE_REST_DRIVER_DEGREES,
-            strict=True,
-        )
-    )
-    max_joint_error = max(joint_errors)
-    violating_indices = tuple(
-        index
-        for index, (error, tolerance) in enumerate(
-            zip(
-                joint_errors,
-                STORAGE_REST_DRIVER_TOLERANCES_DEGREES,
-                strict=True,
-            )
-        )
-        if error > tolerance
-    )
-    if violating_indices:
-        violating_index = max(
-            violating_indices,
-            key=joint_errors.__getitem__,
-        )
-        violating_name = SO100_PLUS_ARM_JOINT_NAMES[violating_index]
-        raise RuntimeError(
-            f"当前位置不是本机已测的 follower_rest：{violating_name} "
-            f"偏差 {joint_errors[violating_index]:.3f}° 超过 "
-            f"{STORAGE_REST_DRIVER_TOLERANCES_DEGREES[violating_index]:.1f}°。"
-        )
-    return max_joint_error
-
-
 def validate_initial_pose(
     snapshot: PoseSnapshot,
     candidate: WorkspaceCandidate,
@@ -520,66 +480,11 @@ def validate_initial_pose(
     max_joint_error_degrees: float = MAX_INITIAL_JOINT_ERROR_DEGREES,
     max_tcp_error_m: float = MAX_INITIAL_TCP_ERROR_M,
 ) -> tuple[float, float]:
-    joint_errors = tuple(
-        abs(math.degrees(actual - expected))
-        for actual, expected in zip(
-            snapshot.joint_radians,
-            SO100_PLUS_JOYCON_INITIAL_RADIANS,
-            strict=True,
-        )
-    )
-    max_joint_error = max(joint_errors)
-    tcp_error = math.dist(
-        snapshot.tcp_position_m,
+    return validate_work_initial_pose(
+        snapshot,
         candidate.initial_position_m,
-    )
-    if max_joint_error > max_joint_error_degrees:
-        raise RuntimeError(
-            f"没有到达 JoyCon 初始工作姿态：最大关节偏差 "
-            f"{max_joint_error:.3f}° 超过 {max_joint_error_degrees:.1f}°。"
-        )
-    if tcp_error > max_tcp_error_m:
-        raise RuntimeError(
-            f"当前 TCP 与仿真初始工作姿态相差 "
-            f"{tcp_error * 100:.3f} cm，超过 "
-            f"{max_tcp_error_m * 100:.1f} cm。"
-        )
-    return max_joint_error, tcp_error
-
-
-def _arm_driver_degrees(follower_bus) -> tuple[float, ...]:
-    motor_names = tuple(follower_bus.motor_names)
-    positions = tuple(
-        float(value) for value in follower_bus.read("Present_Position")
-    )
-    if len(motor_names) != len(positions):
-        raise RuntimeError("电机名称与位置数量不一致。")
-    position_by_name = dict(zip(motor_names, positions, strict=True))
-    missing = tuple(
-        name
-        for name in SO100_PLUS_ARM_JOINT_NAMES
-        if name not in position_by_name
-    )
-    if missing:
-        raise RuntimeError(f"缺少手臂关节：{', '.join(missing)}。")
-    return tuple(position_by_name[name] for name in SO100_PLUS_ARM_JOINT_NAMES)
-
-
-def _read_pose_snapshot(
-    follower_bus,
-    kinematics: SO100PlusKinematics,
-) -> PoseSnapshot:
-    driver_degrees = _arm_driver_degrees(follower_bus)
-    joint_radians = kinematics.driver_degrees_to_model_radians(
-        driver_degrees
-    )
-    return PoseSnapshot(
-        driver_degrees=driver_degrees,
-        joint_radians=joint_radians,
-        tcp_position_m=kinematics.forward_position(joint_radians),
-        torque_enabled=tuple(
-            int(value) for value in follower_bus.read("Torque_Enable")
-        ),
+        max_joint_error_degrees=max_joint_error_degrees,
+        max_tcp_error_m=max_tcp_error_m,
     )
 
 
@@ -635,29 +540,24 @@ def validate_storage_to_initial_transition(
 ) -> TransitionValidation:
     """确认收纳姿态只脱离已有贴靠、TCP 单调上升且最终无接触。"""
 
+    shared_transition = build_so100_plus_storage_transition(
+        start_joint_radians,
+        kinematics,
+    )
     start = np.asarray(
-        _finite_tuple(
-            start_joint_radians,
-            length=len(SO100_PLUS_ARM_JOINT_NAMES),
-            label="收纳姿态关节角",
-        ),
+        shared_transition.storage_joint_radians,
         dtype=float,
     )
-    target = np.asarray(SO100_PLUS_JOYCON_INITIAL_RADIANS, dtype=float)
-    delta = target - start
-    max_joint_change = float(np.max(np.abs(delta)))
-    step_count = max(
-        1,
-        math.ceil(max_joint_change / SIMULATION_STEP_RADIANS),
+    target = np.asarray(shared_transition.work_joint_radians, dtype=float)
+    path = np.asarray(
+        shared_transition.path_joint_radians,
+        dtype=float,
     )
-    fractions = np.arange(step_count + 1, dtype=float) / step_count
-    path = start + fractions[:, np.newaxis] * delta
     positions = np.asarray(
-        [kinematics.forward_position(joints) for joints in path],
+        shared_transition.path_positions_m,
         dtype=float,
     )
-    if np.any(np.diff(positions[:, 2]) < -1e-9):
-        raise RuntimeError("收纳姿态展开路径的 TCP 不是单调上升。")
+    max_joint_change = float(np.max(np.abs(target - start)))
 
     model = mujoco.MjModel.from_xml_path(str(model_path))
     data = mujoco.MjData(model)
@@ -681,7 +581,10 @@ def validate_storage_to_initial_transition(
 
     if data.ncon:
         raise RuntimeError("JoyCon 初始工作姿态仍存在模型接触。")
-    escape = start + ESCAPE_FRACTION * delta
+    escape = np.asarray(
+        shared_transition.escape_joint_radians,
+        dtype=float,
+    )
     data.qpos[:6] = escape
     data.qpos[6] = -0.157
     mujoco.mj_forward(model, data)

@@ -123,6 +123,54 @@ def test_right_follower_gateway_uses_formal_workspace_boundaries():
     assert "x" in rejected.message
 
 
+def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
+    class StubSession:
+        def __init__(self):
+            self.calls = []
+
+        def _handle(self, command):
+            self.calls.append(command.skill_name)
+            return ExecutionResult(
+                command_id=command.command_id,
+                skill_name=command.skill_name,
+                success=True,
+                message="called",
+            )
+
+        move_arm = _handle
+        open_gripper = _handle
+        close_gripper = _handle
+        stop = _handle
+        unfold_arm = _handle
+        fold_arm = _handle
+
+    session = StubSession()
+    right_skills = build_so100_plus_right_follower_arm_skills(
+        MockArmAdapter(),
+        session=session,
+    )
+
+    accepted_unfold = run_command(
+        make_command("unfold_arm", {}),
+        right_skills,
+    )
+    rejected_unfold = run_command(
+        make_command("unfold_arm", {"storage_escape": [0, 0, 0]}),
+        right_skills,
+    )
+    rejected_fold = run_command(
+        make_command("fold_arm", {"speed": 1.0}),
+        right_skills,
+    )
+
+    assert accepted_unfold.success is True
+    assert rejected_unfold.success is False
+    assert "不允许额外参数" in rejected_unfold.message
+    assert rejected_fold.success is False
+    assert "不允许额外参数" in rejected_fold.message
+    assert session.calls == ["unfold_arm"]
+
+
 def test_reject_unknown_skill():
     result = run_command(make_command("destroy_arm", {}), skills)
     assert result.success is False

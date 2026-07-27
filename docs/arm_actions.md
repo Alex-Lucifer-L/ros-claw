@@ -569,6 +569,13 @@ adapter.disconnect_cameras()
 | `stop` | `stop()` | 已实现 |
 | `disable_torque` | `disable_torque()` | 底层已实现；高风险，默认不向 Gateway/LLM 开放 |
 
+SO-100 Plus right_follower 的专用注册表另外提供：
+
+| Skill | 固定流程 | 用户参数 |
+| --- | --- | --- |
+| `unfold_arm` | `follower_rest → storage_escape → JoyCon 工作初始姿态` | 必须为 `{}` |
+| `fold_arm` | 先返回 JoyCon 工作初始姿态，再执行 `storage_escape → follower_rest` | 必须为 `{}` |
+
 `disable_torque()` 仍供本地维护和受控关闭流程直接调用；默认禁用的是
 普通 Gateway/LLM Skill 入口，不是删除底层卸力能力。
 
@@ -577,18 +584,82 @@ adapter.disconnect_cameras()
 MotionLimits 和 right-follower Skills，把真实 Adapter 接入相同 Gateway
 与 ExecutionController。摄像头不参与这次装配。
 
-真机连接后，`runtime.py` 会用当前六关节位置计算启动 TCP，并同时检查
-关节姿态是否满足原真机验收脚本
-`MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 采用的启动门槛。运行时直接使用
-`abs(actual - expected)`，不把 `expected ± 2π` 折叠为等价角。这个数值
-是验收采用的启动判定门槛，不表示六关节任意独立 `±5°` 组合都经过真机
-验证。TCP 或关节姿态任一不符合时，只把运行时 Skill 注册表里的
-`move_arm.enabled` 复制为 `False`，不会改写通用 Skill 定义、Safety
-Checker、运动学或 Adapter；夹爪和 `stop` 仍保持启用。Gateway 因而会在调用
-`SO100PlusAdapter.move_to()` 之前返回 `技能未启用: move_arm`。这用于
-防止机械臂仍在 `follower_rest` 时直接求解工作区目标；当前没有把未经
-统一入口验收的收纳展开轨迹伪装成普通 `move_arm`。门禁不会在同一进程
-中自动解除；使用单独验收的流程进入工作区后，应重新启动统一入口。
+### 11.1 会话状态
+
+`follower_rest` 是机械臂的物理收纳关节姿态；下面四项是同一进程中
+`SO100PlusArmSession` 唯一持有的软件会话状态，二者不能混为一谈：
+
+| 会话状态 | 含义 | 允许的运动 Skill |
+| --- | --- | --- |
+| `REST` | 真实反馈符合本机 `follower_rest` 逐关节容差 | `unfold_arm` |
+| `TRANSITION` | 正在展开、返回工作初始点或收纳 | 只允许 `stop` |
+| `WORK` | 实际 TCP 和关节角通过 JoyCon 工作初始姿态门禁 | `move_arm`、`fold_arm`、`open_gripper`、`close_gripper` |
+| `UNVERIFIED` | 姿态无法认证，或状态转换失败/被中断 | 只允许 `stop` 和安全退出 |
+
+启动连接后必须读取实际反馈再分类，不能假定机械臂位于收纳姿态：
+
+```text
+符合 follower_rest 逐关节容差                         → REST
+否则，符合 JoyCon 初始 TCP 门槛和 5°关节门槛          → WORK
+否则                                                   → UNVERIFIED
+```
+
+这里的 `5°` 是原真机验收脚本
+`MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 采用的启动门槛。代码直接比较
+`abs(actual - expected)`，不会把 `expected + 2π` 或
+`expected - 2π` 折叠为相同角度。这个描述不表示六个关节任意独立
+`±5°` 组合都已经通过真机验证。
+
+JoyCon 工作初始 TCP 位于外层候选框的 X 下边界
+`x=0.303571... m`，比正式 12 cm 工作框的 X 下边界低 1 cm。因此：
+
+- 工作初始姿态使用原验收脚本的“初始 TCP 误差不超过 3 cm +
+  真实关节偏差不超过 5°”门禁进行认证；
+- 它是展开和收纳使用的固定检查点，不是用户可以任意发送的
+  `move_arm` 目标；
+- 普通 `move_arm` 的用户目标仍必须位于原有
+  `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS`，没有扩大正式工作空间。
+
+`storage_escape` 是从当次已认证的收纳关节姿态向
+`SO100_PLUS_JOYCON_INITIAL_RADIANS` 做原验收轨迹 `20%` 插值得到的
+固定中间检查点。运行时只执行这个已验收顺序，不接受用户覆盖中间姿态、
+工作初始姿态、收纳姿态、速度或安全限制。MuJoCo 接触复核仍由验收脚本
+负责；普通统一入口不会启动仿真 UI。
+
+### 11.2 正常工作流
+
+推荐在同一个进程内完成整个会话：
+
+```text
+REST
+→ unfold_arm
+→ WORK
+→ move_arm / open_gripper / close_gripper
+→ fold_arm
+→ REST
+→ exit
+```
+
+JSON 示例：
+
+```json
+{"skill_name":"unfold_arm","params":{}}
+```
+
+```json
+{"skill_name":"fold_arm","params":{}}
+```
+
+展开前会再次读取并确认 `follower_rest`。展开完成后只有实际 TCP 和关节
+姿态都通过门禁，状态才变成 `WORK`。收纳时即使当前位于正式工作框中的
+其他位置，也必须先返回 JoyCon 工作初始姿态并复核，再沿
+`storage_escape` 反向收纳；只有最终真实反馈通过 follower_rest 检查，
+状态才变成 `REST`。
+
+任何展开、返回初始点或收纳阶段的异常和 `stop` 中断都会把状态设为
+`UNVERIFIED`，不能根据原计划目标猜测已经到位。`exit` 不会从 WORK 或
+未知姿态自动收纳；它会提示当前不在认证 follower_rest，然后仍然停止、
+等待后台动作真正结束并断开。普通退出不会自动调用 `disable_torque()`。
 
 `build_so100_plus_right_follower_arm_skills(adapter)` 会把
 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 写入 `move_arm` 的
@@ -756,9 +827,9 @@ python scripts/tune_so100_plus_pid.py \
   运行验收容差，不是厂商精度声明。
 - 真实摄像头已识别并完成软件接入，但尚未抓取单帧。
 - `main.py` 的真机连接、普通退出、Ctrl+C、`stop`、夹爪动作和不自动
-  卸力已经由操作者完成实机检查；从 `follower_rest` 启动时，当前 TCP
-  位于正式工作空间外，因此普通 `move_arm` 会失败关闭。尚未实现并验收
-  统一入口专用的安全展开/收纳转换动作；默认仍是 Mock。
+  卸力已经由操作者完成实机检查；统一入口的 REST/WORK 状态识别和
+  `unfold_arm`/`fold_arm` 自动测试已经完成，但新增的完整会话编排尚需
+  操作者进行一次现场验收。默认后端仍是 Mock。
 - 早期连接、夹爪和 stop 手动脚本会在退出时明确警告
   `disconnect()` 不是关力矩；正式 `move_to` 脚本已执行完整的关力矩清理。
 - 摄像头已经与机械臂生命周期解耦，但真实摄像头单帧仍未验证。
@@ -769,6 +840,7 @@ python scripts/tune_so100_plus_pid.py \
 | --- | --- |
 | 统一 Adapter 接口 | `src/rosclaw_mini/arm/base.py` |
 | 应用 Adapter、Skills 和 Controller 装配 | `src/rosclaw_mini/runtime.py` |
+| SO-100 Plus 会话状态和固定展开/收纳编排 | `src/rosclaw_mini/arm/so100_plus_session.py` |
 | SO-100 Plus 真实 Adapter | `src/rosclaw_mini/arm/so100_plus.py` |
 | 运动学和 TCP | `src/rosclaw_mini/arm/kinematics.py` |
 | 机器、校准和摄像头 factory | `src/rosclaw_mini/arm/so100_plus_factory.py` |

@@ -1,7 +1,7 @@
 """应用运行时装配：把 Adapter、Skills 和 Controller 连接起来。"""
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import hashlib
 import math
 from pathlib import Path
@@ -15,9 +15,18 @@ from rosclaw_mini.arm.kinematics import (
 )
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.arm.so100_plus import (
+    SO100_PLUS_REAL_HARDWARE_PROFILE,
     SO100PlusAdapter,
     SO100PlusGripperConfig,
     SO100PlusMotionConfig,
+)
+from rosclaw_mini.arm.so100_plus_session import (
+    ArmSessionState,
+    SO100PlusArmSession,
+    build_so100_plus_storage_transition,
+    build_so100_plus_transition_motion_limits,
+    classify_so100_plus_startup_pose,
+    read_so100_plus_pose_snapshot,
 )
 from rosclaw_mini.arm.so100_plus_factory import (
     SO100PlusConfigurationError,
@@ -28,13 +37,11 @@ from rosclaw_mini.execution.controller import ExecutionController
 from rosclaw_mini.gateway.command.gateway import run_command
 from rosclaw_mini.safety.limits import (
     AxisLimits,
-    LimitViolationError,
-    SO100_PLUS_ARM_JOINT_NAMES,
-    SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
     WorkspaceLimits,
     build_so100_plus_right_follower_motion_limits,
 )
 from rosclaw_mini.skills.arm_skills import (
+    bind_so100_plus_arm_session,
     build_arm_skills,
     build_so100_plus_right_follower_arm_skills,
 )
@@ -97,6 +104,7 @@ class ArmRuntime:
     controller: ExecutionController
     current_tcp_position_m: tuple[float, float, float] | None = None
     move_arm_disabled_reason: str | None = None
+    session: SO100PlusArmSession | None = None
     shutdown_wait_timeout_seconds: float = (
         DEFAULT_SHUTDOWN_WAIT_TIMEOUT_SECONDS
     )
@@ -150,7 +158,10 @@ class ArmRuntime:
                 )
             else:
                 try:
-                    self.adapter.stop()
+                    if self.session is None:
+                        self.adapter.stop()
+                    else:
+                        self.session.request_stop()
                 except Exception as error:
                     errors.append(f"stop 失败：{error}")
 
@@ -187,6 +198,24 @@ class ArmRuntime:
 
             if errors:
                 raise ArmRuntimeShutdownError("；".join(errors) + "。")
+
+    @property
+    def session_state(self) -> ArmSessionState | None:
+        """返回真机会话的唯一状态；Mock 后端没有姿态状态机。"""
+
+        return self.session.state if self.session is not None else None
+
+    @property
+    def exit_pose_warning(self) -> str | None:
+        """退出前提示未处于认证收纳姿态，但不阻止安全断开。"""
+
+        state = self.session_state
+        if state is None or state is ArmSessionState.REST:
+            return None
+        return (
+            f"退出提示：当前会话状态为 {state.value}，机械臂未处于"
+            "认证 follower_rest；不会自动展开或收纳，将只停止、等待并断开。"
+        )
 
     def _start_deferred_cleanup(self) -> None:
         """安排后台动作结束后的最终断开；调用方必须持有关闭锁。"""
@@ -304,47 +333,6 @@ def build_mock_runtime(
     )
 
 
-def _read_current_arm_joint_radians(
-    robot: Any,
-    follower_name: str,
-    kinematics: SO100PlusKinematics,
-) -> tuple[float, ...]:
-    """读取已连接 follower 的六关节位置，供正式 MotionLimits 装配。"""
-
-    try:
-        follower_bus = robot.follower_arms[follower_name]
-    except (AttributeError, KeyError) as error:
-        raise RuntimeError(
-            f"真机 Robot 缺少 follower {follower_name!r}。"
-        ) from error
-
-    motor_names = tuple(follower_bus.motor_names)
-    positions = tuple(float(value) for value in follower_bus.read("Present_Position"))
-    if len(motor_names) != len(positions):
-        raise RuntimeError("follower 返回的电机名称数量与当前位置数量不一致。")
-    if len(set(motor_names)) != len(motor_names):
-        raise RuntimeError("follower 返回了重复的电机名称。")
-
-    position_by_name = dict(zip(motor_names, positions, strict=True))
-    missing_names = tuple(
-        name
-        for name in SO100_PLUS_ARM_JOINT_NAMES
-        if name not in position_by_name
-    )
-    if missing_names:
-        raise RuntimeError(
-            f"follower 缺少手臂关节：{', '.join(missing_names)}。"
-        )
-
-    driver_degrees = tuple(
-        position_by_name[name]
-        for name in SO100_PLUS_ARM_JOINT_NAMES
-    )
-    return tuple(
-        kinematics.driver_degrees_to_model_radians(driver_degrees)
-    )
-
-
 def _cleanup_connected_adapter(adapter: ArmAdapter) -> None:
     """装配中途失败时尽力停止并断开，但不调用 disable_torque。"""
 
@@ -354,72 +342,6 @@ def _cleanup_connected_adapter(adapter: ArmAdapter) -> None:
     finally:
         if adapter.is_connected:
             adapter.disconnect()
-
-
-def _apply_so100_plus_startup_certification_gate(
-    skills: dict[str, SkillDefinition],
-    current_tcp_position_m: tuple[float, float, float],
-    current_joint_radians: tuple[float, ...],
-    certification: SO100PlusWorkspaceCertification,
-) -> tuple[dict[str, SkillDefinition], str | None]:
-    """启动 TCP 或关节姿态不符合认证时，失败关闭 move_arm Skill。"""
-
-    move_arm_skill = skills.get("move_arm")
-    if move_arm_skill is None:
-        raise RuntimeError("right_follower Skill 注册表缺少 move_arm。")
-
-    violations: list[str] = []
-    try:
-        SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS.validate_position(
-            *current_tcp_position_m
-        )
-    except LimitViolationError as error:
-        position = ", ".join(
-            f"{value:.6f}" for value in current_tcp_position_m
-        )
-        violations.append(
-            f"启动 TCP ({position}) m 不在当前 right_follower "
-            f"正式工作空间内（{error}）"
-        )
-
-    try:
-        joint_errors_degrees = tuple(
-            abs(math.degrees(actual - expected))
-            for actual, expected in zip(
-                current_joint_radians,
-                certification.startup_joint_radians,
-                strict=True,
-            )
-        )
-    except ValueError as error:
-        raise RuntimeError("当前关节数与已认证启动姿态不一致。") from error
-
-    max_joint_error_degrees = max(joint_errors_degrees)
-    if max_joint_error_degrees > certification.startup_joint_tolerance_degrees:
-        max_error_index = joint_errors_degrees.index(max_joint_error_degrees)
-        violations.append(
-            "启动关节姿态不在已认证范围内："
-            f"{SO100_PLUS_ARM_JOINT_NAMES[max_error_index]} 偏差 "
-            f"{max_joint_error_degrees:.3f}°，超过 "
-            f"{certification.startup_joint_tolerance_degrees:.1f}°"
-        )
-
-    if violations:
-        gated_skills = dict(skills)
-        gated_skills["move_arm"] = replace(
-            move_arm_skill,
-            enabled=False,
-        )
-        reason = (
-            "move_arm 已失败关闭："
-            + "；".join(violations)
-            + "。"
-            "请退出统一入口，使用经过验证的收纳展开流程进入工作区后重新启动；"
-            "不要从 follower_rest 直接发送工作空间目标。"
-        )
-        return gated_skills, reason
-
-    return skills, None
 
 
 def build_so100_plus_runtime(
@@ -433,6 +355,9 @@ def build_so100_plus_runtime(
     adapter_factory: Callable[..., SO100PlusAdapter] = SO100PlusAdapter,
     motion_limits_builder: Callable[..., Any] = (
         build_so100_plus_right_follower_motion_limits
+    ),
+    transition_motion_limits_builder: Callable[..., Any] = (
+        build_so100_plus_transition_motion_limits
     ),
     skill_builder: Callable[
         [ArmAdapter], dict[str, SkillDefinition]
@@ -468,38 +393,96 @@ def build_so100_plus_runtime(
     try:
         # connect() 会启用力矩并恢复正式运行参数，因此只能在风险确认后执行。
         active_adapter.connect()
-        current_joint_radians = _read_current_arm_joint_radians(
-            robot,
-            robot_config.follower_name,
+        try:
+            follower_bus = robot.follower_arms[robot_config.follower_name]
+        except (AttributeError, KeyError) as error:
+            raise RuntimeError(
+                f"真机 Robot 缺少 follower "
+                f"{robot_config.follower_name!r}。"
+            ) from error
+
+        initial_snapshot = read_so100_plus_pose_snapshot(
+            follower_bus,
+            kinematics,
+            include_torque=False,
+        )
+        work_tcp_position_m = tuple(
+            kinematics.forward_position(
+                certification.startup_joint_radians
+            )
+        )
+        startup_state, _startup_reason = classify_so100_plus_startup_pose(
+            initial_snapshot,
+            work_tcp_position_m,
+        )
+        storage_joint_radians = (
+            initial_snapshot.joint_radians
+            if startup_state is ArmSessionState.REST
+            else SO100PlusKinematics.driver_degrees_to_model_radians(
+                SO100_PLUS_REAL_HARDWARE_PROFILE.storage_rest_driver_degrees
+            )
+        )
+        transition = build_so100_plus_storage_transition(
+            storage_joint_radians,
             kinematics,
         )
-        current_tcp_position_m = tuple(
-            kinematics.forward_position(current_joint_radians)
+        motion_limits = motion_limits_builder(
+            initial_snapshot.joint_radians
         )
-        motion_limits = motion_limits_builder(current_joint_radians)
+        transition_motion_limits = transition_motion_limits_builder(
+            transition
+        )
 
-        # 复用同一个已连接 Robot；这个最终 Adapter 才交给 Skills 和 Controller。
-        active_adapter = adapter_factory(
+        # 两个 Adapter 复用同一个已连接 Robot。普通 Skill 只能看到正式
+        # 工作区 Adapter；固定展开/收纳通道只由会话内部使用。
+        work_adapter = adapter_factory(
             robot,
             gripper_config,
             kinematics=kinematics,
             motion_limits=motion_limits,
             motion_config=SO100PlusMotionConfig(),
         )
-        skills, move_arm_disabled_reason = (
-            _apply_so100_plus_startup_certification_gate(
-                skill_builder(active_adapter),
-                current_tcp_position_m,
-                current_joint_radians,
-                certification,
+        active_adapter = work_adapter
+        transition_adapter = adapter_factory(
+            robot,
+            gripper_config,
+            kinematics=kinematics,
+            motion_limits=transition_motion_limits,
+            motion_config=SO100PlusMotionConfig(),
+        )
+
+        def pose_reader():
+            return read_so100_plus_pose_snapshot(
+                follower_bus,
+                kinematics,
+                include_torque=False,
             )
+
+        session = SO100PlusArmSession(
+            work_adapter=work_adapter,
+            transition_adapter=transition_adapter,
+            pose_reader=pose_reader,
+            kinematics=kinematics,
+            initial_snapshot=initial_snapshot,
+            storage_joint_radians=storage_joint_radians,
+        )
+        skills = bind_so100_plus_arm_session(
+            skill_builder(work_adapter),
+            session,
+        )
+        move_arm_disabled_reason = (
+            "当前姿态无法认证，所有运动动作已失败关闭："
+            + session.state_reason
+            if session.state is ArmSessionState.UNVERIFIED
+            else None
         )
         return ArmRuntime(
-            adapter=active_adapter,
+            adapter=work_adapter,
             skills=skills,
             controller=_build_controller(skills),
-            current_tcp_position_m=current_tcp_position_m,
+            current_tcp_position_m=initial_snapshot.tcp_position_m,
             move_arm_disabled_reason=move_arm_disabled_reason,
+            session=session,
         )
     except BaseException:
         try:

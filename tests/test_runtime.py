@@ -5,7 +5,12 @@ from threading import Event
 import pytest
 
 from rosclaw_mini.arm.base import ArmAdapter
-from rosclaw_mini.arm.kinematics import SO100_PLUS_JOYCON_INITIAL_RADIANS
+from rosclaw_mini.arm.kinematics import (
+    SO100_PLUS_JOYCON_INITIAL_RADIANS,
+    SO100PlusKinematics,
+)
+from rosclaw_mini.arm.so100_plus import SO100_PLUS_REAL_HARDWARE_PROFILE
+from rosclaw_mini.arm.so100_plus_session import ArmSessionState
 from rosclaw_mini.arm.so100_plus_factory import (
     SO100_PLUS_MOTOR_NAMES,
     SO100PlusConfigurationError,
@@ -283,6 +288,38 @@ def test_runtime_shutdown_reports_adapter_disconnect_during_stop():
     assert "disable_torque" not in adapter.calls
 
 
+def test_runtime_exit_from_work_only_stops_and_disconnects_without_folding():
+    adapter = RecordingAdapter()
+
+    class WorkSession:
+        state = ArmSessionState.WORK
+        state_reason = "测试中的 WORK"
+
+        def __init__(self):
+            self.calls = []
+
+        def request_stop(self):
+            assert adapter.is_connected is True
+            self.calls.append("request_stop")
+
+    session = WorkSession()
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=ExecutionController(_successful_result),
+        session=session,
+    )
+
+    assert "未处于认证 follower_rest" in runtime.exit_pose_warning
+
+    runtime.shutdown()
+
+    assert session.calls == ["request_stop"]
+    assert adapter.calls == ["disconnect"]
+    assert adapter.is_connected is False
+    assert "disable_torque" not in adapter.calls
+
+
 def test_so100_plus_runtime_requires_risk_ack_before_factory_call():
     factory_called = False
 
@@ -334,18 +371,23 @@ def test_so100_plus_runtime_rejects_unregistered_follower_before_factory_call():
 class FakeBus:
     motor_names = SO100_PLUS_MOTOR_NAMES
 
-    def __init__(self) -> None:
+    def __init__(self, positions=None) -> None:
         self.read_calls: list[str] = []
+        self.positions = (
+            (10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0)
+            if positions is None
+            else tuple(positions)
+        )
 
     def read(self, register: str):
         self.read_calls.append(register)
-        return (10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0)
+        return self.positions
 
 
 class FakeRobot:
-    def __init__(self) -> None:
+    def __init__(self, positions=None) -> None:
         self.is_connected = False
-        self.follower_arms = {"right": FakeBus()}
+        self.follower_arms = {"right": FakeBus(positions)}
 
 
 class FakeKinematics:
@@ -396,6 +438,9 @@ class FakeSO100PlusAdapter(RecordingAdapter):
         self.calls.append("disconnect")
         self.robot.is_connected = False
 
+    def move_joints(self, joint_radians) -> None:
+        self.calls.append(("move_joints", tuple(joint_radians)))
+
 
 def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
     tmp_path,
@@ -438,29 +483,87 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
         skill_builder=skill_builder,
     )
 
-    assert len(adapters) == 2
+    assert len(adapters) == 3
     assert adapters[0].calls == ["connect"]
     assert runtime.adapter is adapters[1]
     assert skill_adapter is runtime.adapter
-    assert runtime.skills is skills
+    assert runtime.skills is not skills
     assert runtime.skills["move_arm"].enabled is True
+    assert {"unfold_arm", "fold_arm"} <= runtime.skills.keys()
+    assert runtime.session_state is ArmSessionState.WORK
     assert runtime.current_tcp_position_m == (0.35, 0.0, 0.22)
     assert runtime.move_arm_disabled_reason is None
     assert kinematics.driver_inputs == [
         (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)
     ]
-    assert kinematics.forward_inputs == [
-        SO100_PLUS_JOYCON_INITIAL_RADIANS
-    ]
+    assert SO100_PLUS_JOYCON_INITIAL_RADIANS in kinematics.forward_inputs
     assert motion_inputs == [SO100_PLUS_JOYCON_INITIAL_RADIANS]
     assert adapters[1].kwargs["kinematics"] is kinematics
     assert adapters[1].kwargs["motion_limits"] is motion_limits
     assert adapters[1].kwargs["motion_config"] is not None
+    assert adapters[2].kwargs["kinematics"] is kinematics
+    assert adapters[2].kwargs["motion_config"] is not None
     assert robot.follower_arms["right"].read_calls == ["Present_Position"]
 
     runtime.shutdown()
 
     assert adapters[1].calls == ["stop", "disconnect"]
+    assert adapters[2].calls == []
+
+
+def test_so100_plus_runtime_recognizes_storage_feedback_as_rest(tmp_path):
+    config = _certified_robot_config(tmp_path)
+    storage_driver_degrees = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.storage_rest_driver_degrees
+    )
+    storage_joint_radians = (
+        SO100PlusKinematics.driver_degrees_to_model_radians(
+            storage_driver_degrees
+        )
+    )
+    robot = FakeRobot((*storage_driver_degrees, 0.0))
+    kinematics = FakeKinematics(
+        current_tcp_position_m=(0.183792, -0.049054, 0.004970),
+        current_joint_radians=storage_joint_radians,
+    )
+    adapters: list[FakeSO100PlusAdapter] = []
+
+    def adapter_factory(*args, **kwargs):
+        adapter = FakeSO100PlusAdapter(*args, **kwargs)
+        adapters.append(adapter)
+        return adapter
+
+    runtime = build_so100_plus_runtime(
+        config,
+        risk_acknowledged=True,
+        robot_factory=lambda _config: robot,
+        kinematics_factory=lambda: kinematics,
+        adapter_factory=adapter_factory,
+        motion_limits_builder=lambda _current_joints: object(),
+    )
+
+    assert runtime.session_state is ArmSessionState.REST
+    assert runtime.move_arm_disabled_reason is None
+    assert {"unfold_arm", "fold_arm"} <= runtime.skills.keys()
+
+    command = Command(
+        command_id="rest-rejects-move",
+        skill_name="move_arm",
+        params={"x": 0.35, "y": 0.0, "z": 0.22},
+        source="user",
+    )
+    assert runtime.controller.submit(command) is True
+    result = runtime.controller.wait(timeout=1.0)
+
+    assert result is not None
+    assert result.success is False
+    assert "当前状态为 REST" in result.message
+    assert "move_to" not in adapters[1].calls
+
+    runtime.shutdown()
+
+    assert adapters[2].calls == ["stop"]
+    assert adapters[1].calls == ["disconnect"]
 
 
 def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_workspace(
@@ -473,7 +576,13 @@ def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_worksp
             0.208819920,
             -0.021115885,
             0.002416365,
-        )
+        ),
+        current_joint_radians=tuple(
+            value + (math.radians(10.0) if index == 2 else 0.0)
+            for index, value in enumerate(
+                SO100_PLUS_JOYCON_INITIAL_RADIANS
+            )
+        ),
     )
     adapters: list[FakeSO100PlusAdapter] = []
 
@@ -496,12 +605,13 @@ def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_worksp
         -0.021115885,
         0.002416365,
     )
-    assert runtime.skills["move_arm"].enabled is False
+    assert runtime.skills["move_arm"].enabled is True
+    assert runtime.session_state is ArmSessionState.UNVERIFIED
     assert runtime.skills["open_gripper"].enabled is True
     assert runtime.skills["close_gripper"].enabled is True
     assert runtime.skills["stop"].enabled is True
     assert runtime.move_arm_disabled_reason is not None
-    assert "不在当前 right_follower 正式工作空间内" in (
+    assert "当前姿态无法认证" in (
         runtime.move_arm_disabled_reason
     )
 
@@ -516,7 +626,7 @@ def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_worksp
 
     assert result is not None
     assert result.success is False
-    assert result.message == "技能未启用: move_arm"
+    assert "当前状态为 UNVERIFIED" in result.message
     assert "move_to" not in adapters[1].calls
 
     runtime.shutdown()
@@ -551,9 +661,10 @@ def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertifi
         motion_limits_builder=lambda _current_joints: object(),
     )
 
-    assert runtime.skills["move_arm"].enabled is False
+    assert runtime.skills["move_arm"].enabled is True
+    assert runtime.session_state is ArmSessionState.UNVERIFIED
     assert runtime.move_arm_disabled_reason is not None
-    assert "启动关节姿态不在已认证范围内" in (
+    assert "JoyCon 初始工作姿态" in (
         runtime.move_arm_disabled_reason
     )
     assert "ellbow_joint" in runtime.move_arm_disabled_reason
@@ -569,7 +680,7 @@ def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertifi
 
     assert result is not None
     assert result.success is False
-    assert result.message == "技能未启用: move_arm"
+    assert "当前状态为 UNVERIFIED" in result.message
     assert "move_to" not in adapters[1].calls
 
     runtime.shutdown()
@@ -608,7 +719,8 @@ def test_so100_plus_runtime_rejects_full_turn_joint_aliases(
         motion_limits_builder=lambda _current_joints: object(),
     )
 
-    assert runtime.skills["move_arm"].enabled is False
+    assert runtime.skills["move_arm"].enabled is True
+    assert runtime.session_state is ArmSessionState.UNVERIFIED
     assert runtime.move_arm_disabled_reason is not None
     assert "wrist_roll_joint" in runtime.move_arm_disabled_reason
     assert "360.000°" in runtime.move_arm_disabled_reason

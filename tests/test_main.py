@@ -1,3 +1,5 @@
+from threading import Event
+
 import pytest
 
 import rosclaw_mini.main as main_module
@@ -8,6 +10,9 @@ from rosclaw_mini.main import (
     run_json_command_loop,
 )
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
+from rosclaw_mini.arm.so100_plus_session import ArmSessionState
+from rosclaw_mini.command_schema.commands import ExecutionResult
+from rosclaw_mini.execution.controller import ExecutionController
 from rosclaw_mini.runtime import ArmRuntimeShutdownError, build_mock_runtime
 
 
@@ -213,6 +218,54 @@ def test_main_reports_startup_tcp_and_disabled_move_arm_reason():
     assert runtime.shutdown_calls == 1
 
 
+def test_main_reports_rest_session_without_treating_it_as_startup_failure():
+    runtime = FakeRuntime()
+    runtime.session_state = ArmSessionState.REST
+    runtime.exit_pose_warning = None
+    outputs: list[str] = []
+
+    exit_code = main(
+        [
+            "--backend",
+            "so100_plus",
+            "--acknowledge-so100-plus-risk",
+        ],
+        input_func=lambda _prompt: "exit",
+        output_func=outputs.append,
+        runtime_builder=lambda _args: runtime,
+    )
+
+    assert exit_code == 0
+    assert "SO-100 Plus 会话状态: REST" in outputs
+    assert any("可执行 unfold_arm" in message for message in outputs)
+    assert not any("启动失败" in message for message in outputs)
+
+
+def test_main_warns_when_exit_does_not_start_from_rest():
+    runtime = FakeRuntime()
+    runtime.session_state = ArmSessionState.UNVERIFIED
+    runtime.exit_pose_warning = (
+        "退出提示：当前会话状态为 UNVERIFIED，"
+        "不会自动展开或收纳，将只停止、等待并断开。"
+    )
+    outputs: list[str] = []
+
+    exit_code = main(
+        [
+            "--backend",
+            "so100_plus",
+            "--acknowledge-so100-plus-risk",
+        ],
+        input_func=lambda _prompt: "exit",
+        output_func=outputs.append,
+        runtime_builder=lambda _args: runtime,
+    )
+
+    assert exit_code == 0
+    assert runtime.exit_pose_warning in outputs
+    assert runtime.shutdown_calls == 1
+
+
 def test_json_loop_runs_existing_gateway_skill_chain_with_mock():
     runtime = build_mock_runtime(move_duration_seconds=0.0)
     commands = iter(
@@ -280,3 +333,70 @@ def test_json_loop_stop_interrupts_running_move_through_request_stop():
     assert any("停止命令执行结果" in message for message in outputs)
 
     runtime.shutdown()
+
+
+@pytest.mark.parametrize("skill_name", ("unfold_arm", "fold_arm"))
+def test_json_loop_stop_interrupts_background_session_action(skill_name):
+    action_started = Event()
+    stop_requested = Event()
+
+    def runner(command):
+        if command.skill_name == "stop":
+            stop_requested.set()
+            return ExecutionResult(
+                command_id=command.command_id,
+                skill_name=command.skill_name,
+                success=True,
+                message="已请求停止",
+            )
+        action_started.set()
+        stop_requested.wait(timeout=1.0)
+        return ExecutionResult(
+            command_id=command.command_id,
+            skill_name=command.skill_name,
+            success=False,
+            message=f"{skill_name} 被 stop 中断",
+        )
+
+    controller = ExecutionController(runner)
+
+    class ControllerRuntime:
+        pass
+
+    runtime = ControllerRuntime()
+    runtime.controller = controller
+    request_stop_calls = []
+    original_request_stop = controller.request_stop
+
+    def recording_request_stop(command):
+        request_stop_calls.append(command)
+        return original_request_stop(command)
+
+    controller.request_stop = recording_request_stop
+    inputs = iter(
+        (
+            f'{{"skill_name": "{skill_name}", "params": {{}}}}',
+            '{"skill_name": "stop", "params": {}}',
+            "exit",
+        )
+    )
+
+    def input_command(_prompt):
+        command = next(inputs)
+        if '"skill_name": "stop"' in command:
+            assert action_started.wait(timeout=0.5) is True
+        return command
+
+    run_json_command_loop(
+        runtime,
+        input_func=input_command,
+        output_func=lambda _message: None,
+    )
+    action_result = controller.wait(timeout=1.0)
+
+    assert len(request_stop_calls) == 1
+    assert request_stop_calls[0].skill_name == "stop"
+    assert action_result is not None
+    assert action_result.success is False
+    assert action_result.skill_name == skill_name
+    assert "stop 中断" in action_result.message
