@@ -14,15 +14,23 @@ from threading import RLock
 from typing import Protocol
 
 from rosclaw_mini.arm.kinematics import (
+    JointMotionPlan,
     SO100_PLUS_JOYCON_INITIAL_RADIANS,
     SO100PlusKinematics,
 )
 from rosclaw_mini.arm.so100_plus import SO100_PLUS_REAL_HARDWARE_PROFILE
+from rosclaw_mini.arm.so100_plus_trajectory_validation import (
+    SO100PlusMuJoCoTrajectoryValidator,
+    StorageTransitionDirection,
+    VerifiedJointMotionSequence,
+)
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.safety.limits import (
     AxisLimits,
+    LimitViolationError,
     MotionLimits,
     SO100_PLUS_ARM_JOINT_NAMES,
+    SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
     WorkspaceLimits,
     build_so100_plus_right_follower_execution_joint_limits,
 )
@@ -72,6 +80,8 @@ class SO100PlusSessionAdapter(Protocol):
     def move_to(self, x: float, y: float, z: float) -> None: ...
 
     def move_joints(self, joint_radians: Sequence[float]) -> None: ...
+
+    def execute_joint_plan(self, plan: JointMotionPlan) -> None: ...
 
     def open_gripper(self) -> None: ...
 
@@ -380,11 +390,15 @@ class SO100PlusArmSession:
         kinematics: SO100PlusKinematics,
         initial_snapshot: SO100PlusPoseSnapshot,
         storage_joint_radians: Sequence[float],
+        transition_motion_limits: MotionLimits,
+        trajectory_validator: SO100PlusMuJoCoTrajectoryValidator,
     ) -> None:
         self._work_adapter = work_adapter
         self._transition_adapter = transition_adapter
         self._pose_reader = pose_reader
         self._kinematics = kinematics
+        self._transition_motion_limits = transition_motion_limits
+        self._trajectory_validator = trajectory_validator
         self._work_tcp_position_m = tuple(
             kinematics.forward_position(
                 SO100_PLUS_JOYCON_INITIAL_RADIANS
@@ -490,6 +504,66 @@ class SO100PlusArmSession:
             self._state = state
             self._state_reason = reason
 
+    def _transition_was_interrupted(self) -> bool:
+        with self._lock:
+            return self._transition_interrupted
+
+    @staticmethod
+    def _sequence_has_motion(
+        sequence: VerifiedJointMotionSequence,
+    ) -> bool:
+        return any(plan.waypoints_radians for plan in sequence.plans)
+
+    def _execute_verified_sequence(
+        self,
+        sequence: VerifiedJointMotionSequence,
+    ) -> None:
+        for plan in sequence.plans:
+            self._raise_if_transition_interrupted()
+            self._transition_adapter.execute_joint_plan(plan)
+
+    def _plan_storage_sequence(
+        self,
+        start_joint_radians: Sequence[float],
+        transition: SO100PlusStorageTransition,
+        *,
+        direction: StorageTransitionDirection,
+    ) -> tuple[JointMotionPlan, JointMotionPlan]:
+        if direction is StorageTransitionDirection.UNFOLD:
+            first_target = transition.escape_joint_radians
+            second_target = transition.work_joint_radians
+        else:
+            first_target = transition.escape_joint_radians
+            second_target = transition.storage_joint_radians
+
+        first = self._kinematics.plan_joint_pose(
+            current_joint_radians=start_joint_radians,
+            target_joint_radians=first_target,
+            limits=self._transition_motion_limits,
+        )
+        second = self._kinematics.plan_joint_pose(
+            current_joint_radians=first.target_joint_radians,
+            target_joint_radians=second_target,
+            limits=self._transition_motion_limits,
+        )
+        return first, second
+
+    def _validate_fold_start(
+        self,
+        snapshot: SO100PlusPoseSnapshot,
+    ) -> None:
+        try:
+            SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS.validate_position(
+                *snapshot.tcp_position_m
+            )
+        except LimitViolationError:
+            # JoyCon 工作初始点位于正式工作框 X 下限外约 1 cm，只能
+            # 作为 unfold/fold 的固定转换端点。
+            validate_work_initial_pose(
+                snapshot,
+                self._work_tcp_position_m,
+            )
+
     def move_arm(self, command: Command) -> ExecutionResult:
         rejected = self._require_state(command, ArmSessionState.WORK)
         if rejected is not None:
@@ -536,29 +610,44 @@ class SO100PlusArmSession:
             return rejected
 
         stage = "展开前 follower_rest 复核"
+        motion_started = False
         self._activate(
             self._transition_adapter,
             transition_name="unfold_arm",
         )
         try:
+            current_snapshot = self._pose_reader()
             validate_storage_rest_start(
-                self._pose_reader(),
+                current_snapshot,
                 require_torque_disabled=False,
             )
             self._raise_if_transition_interrupted()
+            stage = "按当次 follower_rest 规划完整展开轨迹"
+            transition = build_so100_plus_storage_transition(
+                current_snapshot.joint_radians,
+                self._kinematics,
+            )
+            plans = self._plan_storage_sequence(
+                current_snapshot.joint_radians,
+                transition,
+                direction=StorageTransitionDirection.UNFOLD,
+            )
+            stage = "完整展开轨迹 MuJoCo 碰撞和接触预检查"
+            verified = self._trajectory_validator.verify_storage_transition(
+                plans,
+                escape_joint_radians=transition.escape_joint_radians,
+                kinematics=self._kinematics,
+                direction=StorageTransitionDirection.UNFOLD,
+            )
+            self._raise_if_transition_interrupted()
+            self._transition = transition
             self._set_state(
                 ArmSessionState.TRANSITION,
                 "正在沿已验收路径展开机械臂。",
             )
-            stage = "移动到 storage_escape"
-            self._transition_adapter.move_joints(
-                self._transition.escape_joint_radians
-            )
-            self._raise_if_transition_interrupted()
-            stage = "移动到 JoyCon 工作初始姿态"
-            self._transition_adapter.move_joints(
-                self._transition.work_joint_radians
-            )
+            motion_started = self._sequence_has_motion(verified)
+            stage = "执行已验证的完整展开轨迹"
+            self._execute_verified_sequence(verified)
             self._raise_if_transition_interrupted()
             stage = "展开完成后的 TCP 和关节门禁"
             validate_work_initial_pose(
@@ -570,11 +659,10 @@ class SO100PlusArmSession:
                 "已到达并认证 JoyCon 工作初始姿态。",
             )
         except Exception as error:
-            self._set_state(
-                ArmSessionState.UNVERIFIED,
-                f"unfold_arm 在“{stage}”失败：{error}",
-            )
-            return self._failure(command, self.state_reason)
+            message = f"unfold_arm 在“{stage}”失败：{error}"
+            if motion_started or self._transition_was_interrupted():
+                self._set_state(ArmSessionState.UNVERIFIED, message)
+            return self._failure(command, message)
         finally:
             self._deactivate(self._transition_adapter)
 
@@ -588,33 +676,76 @@ class SO100PlusArmSession:
         if rejected is not None:
             return rejected
 
-        stage = "返回 JoyCon 工作初始姿态"
+        stage = "收纳前读取并认证当前 WORK 起点"
+        motion_started = False
         self._activate(
             self._transition_adapter,
             transition_name="fold_arm",
         )
         try:
-            self._transition_adapter.move_to(*self._work_tcp_position_m)
+            current_snapshot = self._pose_reader()
+            self._validate_fold_start(current_snapshot)
             self._raise_if_transition_interrupted()
-            stage = "收纳前工作初始姿态门禁"
+            stage = "规划当前位置到 JoyCon 工作初始姿态的完整轨迹"
+            return_plan = self._kinematics.plan_position(
+                current_joint_radians=current_snapshot.joint_radians,
+                target_position_m=self._work_tcp_position_m,
+                limits=self._transition_motion_limits,
+            )
+            stage = "返回工作初始姿态轨迹 MuJoCo 碰撞预检查"
+            verified_return = (
+                self._trajectory_validator.verify_collision_free_sequence(
+                    (return_plan,),
+                    self._kinematics,
+                )
+            )
+            self._raise_if_transition_interrupted()
+            if self._sequence_has_motion(verified_return):
+                self._set_state(
+                    ArmSessionState.TRANSITION,
+                    "正在返回 JoyCon 工作初始姿态。",
+                )
+                motion_started = True
+                stage = "执行已验证的工作初始姿态返回轨迹"
+                self._execute_verified_sequence(verified_return)
+                self._raise_if_transition_interrupted()
+
+            stage = "返回后的工作初始姿态门禁"
+            work_snapshot = self._pose_reader()
             validate_work_initial_pose(
-                self._pose_reader(),
+                work_snapshot,
                 self._work_tcp_position_m,
             )
             self._raise_if_transition_interrupted()
-            self._set_state(
-                ArmSessionState.TRANSITION,
-                "正在沿已验收反向路径收纳机械臂。",
+            stage = "规划 JoyCon 初始姿态到 follower_rest 的完整反向轨迹"
+            storage_plans = self._plan_storage_sequence(
+                work_snapshot.joint_radians,
+                self._transition,
+                direction=StorageTransitionDirection.FOLD,
             )
-            stage = "反向移动到 storage_escape"
-            self._transition_adapter.move_joints(
-                self._transition.escape_joint_radians
+            stage = "完整反向收纳轨迹 MuJoCo 碰撞和接触预检查"
+            verified_storage = (
+                self._trajectory_validator.verify_storage_transition(
+                    storage_plans,
+                    escape_joint_radians=(
+                        self._transition.escape_joint_radians
+                    ),
+                    kinematics=self._kinematics,
+                    direction=StorageTransitionDirection.FOLD,
+                )
             )
             self._raise_if_transition_interrupted()
-            stage = "反向移动到 follower_rest"
-            self._transition_adapter.move_joints(
-                self._transition.storage_joint_radians
+            if not motion_started:
+                self._set_state(
+                    ArmSessionState.TRANSITION,
+                    "正在沿已验收反向路径收纳机械臂。",
+                )
+            motion_started = (
+                motion_started
+                or self._sequence_has_motion(verified_storage)
             )
+            stage = "执行已验证的完整反向收纳轨迹"
+            self._execute_verified_sequence(verified_storage)
             self._raise_if_transition_interrupted()
             stage = "收纳完成后的 follower_rest 门禁"
             validate_storage_rest_start(
@@ -626,11 +757,10 @@ class SO100PlusArmSession:
                 "收纳完成，实际反馈符合 follower_rest 逐关节容差。",
             )
         except Exception as error:
-            self._set_state(
-                ArmSessionState.UNVERIFIED,
-                f"fold_arm 在“{stage}”失败：{error}",
-            )
-            return self._failure(command, self.state_reason)
+            message = f"fold_arm 在“{stage}”失败：{error}"
+            if motion_started or self._transition_was_interrupted():
+                self._set_state(ArmSessionState.UNVERIFIED, message)
+            return self._failure(command, message)
         finally:
             self._deactivate(self._transition_adapter)
 

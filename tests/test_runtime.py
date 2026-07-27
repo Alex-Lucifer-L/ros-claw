@@ -11,6 +11,9 @@ from rosclaw_mini.arm.kinematics import (
 )
 from rosclaw_mini.arm.so100_plus import SO100_PLUS_REAL_HARDWARE_PROFILE
 from rosclaw_mini.arm.so100_plus_session import ArmSessionState
+from rosclaw_mini.arm.so100_plus_trajectory_validation import (
+    SO100PlusTrajectoryValidationUnavailableError,
+)
 from rosclaw_mini.arm.so100_plus_factory import (
     SO100_PLUS_MOTOR_NAMES,
     SO100PlusConfigurationError,
@@ -442,6 +445,14 @@ class FakeSO100PlusAdapter(RecordingAdapter):
         self.calls.append(("move_joints", tuple(joint_radians)))
 
 
+class FakeTrajectoryValidator:
+    """运行时装配测试不加载 MuJoCo，也不访问任何设备。"""
+
+
+def _fake_trajectory_validator_factory():
+    return FakeTrajectoryValidator()
+
+
 def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
     tmp_path,
 ):
@@ -480,6 +491,7 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
         kinematics_factory=lambda: kinematics,
         adapter_factory=adapter_factory,
         motion_limits_builder=motion_limits_builder,
+        trajectory_validator_factory=_fake_trajectory_validator_factory,
         skill_builder=skill_builder,
     )
 
@@ -540,6 +552,7 @@ def test_so100_plus_runtime_recognizes_storage_feedback_as_rest(tmp_path):
         kinematics_factory=lambda: kinematics,
         adapter_factory=adapter_factory,
         motion_limits_builder=lambda _current_joints: object(),
+        trajectory_validator_factory=_fake_trajectory_validator_factory,
     )
 
     assert runtime.session_state is ArmSessionState.REST
@@ -598,6 +611,7 @@ def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_worksp
         kinematics_factory=lambda: kinematics,
         adapter_factory=adapter_factory,
         motion_limits_builder=lambda _current_joints: object(),
+        trajectory_validator_factory=_fake_trajectory_validator_factory,
     )
 
     assert runtime.current_tcp_position_m == (
@@ -659,6 +673,7 @@ def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertifi
         kinematics_factory=lambda: kinematics,
         adapter_factory=adapter_factory,
         motion_limits_builder=lambda _current_joints: object(),
+        trajectory_validator_factory=_fake_trajectory_validator_factory,
     )
 
     assert runtime.skills["move_arm"].enabled is True
@@ -717,6 +732,7 @@ def test_so100_plus_runtime_rejects_full_turn_joint_aliases(
         kinematics_factory=lambda: kinematics,
         adapter_factory=adapter_factory,
         motion_limits_builder=lambda _current_joints: object(),
+        trajectory_validator_factory=_fake_trajectory_validator_factory,
     )
 
     assert runtime.skills["move_arm"].enabled is True
@@ -782,6 +798,36 @@ def test_so100_plus_runtime_rejects_changed_calibration_before_factory(
     assert factory_called is False
 
 
+def test_so100_plus_runtime_fails_closed_before_robot_when_mujoco_unavailable(
+    tmp_path,
+):
+    config = _certified_robot_config(tmp_path)
+    factory_called = False
+
+    def forbidden_factory(_config):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("MuJoCo 不可用时不应创建或连接 Robot")
+
+    def unavailable_validator_factory():
+        raise SO100PlusTrajectoryValidationUnavailableError(
+            "模拟 MuJoCo 验证器不可用"
+        )
+
+    with pytest.raises(
+        SO100PlusTrajectoryValidationUnavailableError,
+        match="模拟 MuJoCo 验证器不可用",
+    ):
+        build_so100_plus_runtime(
+            config,
+            risk_acknowledged=True,
+            robot_factory=forbidden_factory,
+            trajectory_validator_factory=unavailable_validator_factory,
+        )
+
+    assert factory_called is False
+
+
 def test_so100_plus_runtime_cleans_up_if_post_connect_assembly_fails(
     tmp_path,
 ):
@@ -805,6 +851,9 @@ def test_so100_plus_runtime_cleans_up_if_post_connect_assembly_fails(
             kinematics_factory=FakeKinematics,
             adapter_factory=adapter_factory,
             motion_limits_builder=failing_limits_builder,
+            trajectory_validator_factory=(
+                _fake_trajectory_validator_factory
+            ),
         )
 
     assert adapters[0].calls == ["connect", "stop", "disconnect"]

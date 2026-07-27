@@ -28,6 +28,9 @@ from rosclaw_mini.arm.so100_plus_session import (
     classify_so100_plus_startup_pose,
     read_so100_plus_pose_snapshot,
 )
+from rosclaw_mini.arm.so100_plus_trajectory_validation import (
+    SO100PlusMuJoCoTrajectoryValidator,
+)
 from rosclaw_mini.arm.so100_plus_factory import (
     SO100PlusConfigurationError,
     SO100PlusRobotConfig,
@@ -359,6 +362,9 @@ def build_so100_plus_runtime(
     transition_motion_limits_builder: Callable[..., Any] = (
         build_so100_plus_transition_motion_limits
     ),
+    trajectory_validator_factory: Callable[
+        [], SO100PlusMuJoCoTrajectoryValidator
+    ] = SO100PlusMuJoCoTrajectoryValidator,
     skill_builder: Callable[
         [ArmAdapter], dict[str, SkillDefinition]
     ] = build_so100_plus_right_follower_arm_skills,
@@ -380,6 +386,8 @@ def build_so100_plus_runtime(
         robot_config,
         certification,
     )
+    # MuJoCo 或模型不可用时必须在创建、连接 Robot 之前失败关闭。
+    trajectory_validator = trajectory_validator_factory()
 
     robot = robot_factory(robot_config)
     kinematics = kinematics_factory()
@@ -465,6 +473,8 @@ def build_so100_plus_runtime(
             kinematics=kinematics,
             initial_snapshot=initial_snapshot,
             storage_joint_radians=storage_joint_radians,
+            transition_motion_limits=transition_motion_limits,
+            trajectory_validator=trajectory_validator,
         )
         skills = bind_so100_plus_arm_session(
             skill_builder(work_adapter),

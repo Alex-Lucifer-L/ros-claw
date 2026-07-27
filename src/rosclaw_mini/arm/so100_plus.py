@@ -679,6 +679,64 @@ class SO100PlusAdapter(ArmAdapter):
         with self._motion_lock:
             return self._plan_joints_locked(joint_radians)
 
+    def execute_joint_plan(self, plan: JointMotionPlan) -> None:
+        """执行调用方已经完整预检查的同一个关节计划，不重新规划。
+
+        这个入口只供受控会话使用。普通用户动作仍应调用 ``move_to``；
+        本方法不会扩大其工作空间，也不会绕过现有关节单步、遥测、
+        跟踪误差、负载、温度和最终到位检查。
+        """
+
+        if not self.is_connected:
+            raise RuntimeError("手臂操作前必须先显式连接机械臂。")
+        self._raise_if_motion_planning_disabled()
+        if self.motion_config is None:
+            raise SO100PlusMotionExecutionDisabledError(
+                "未配置经过确认的运动执行参数，物理移动保持禁用。"
+            )
+        if not isinstance(plan, JointMotionPlan):
+            raise TypeError("execute_joint_plan 需要 JointMotionPlan。")
+
+        with self._motion_lock:
+            self._stop_requested.clear()
+            self.motion_limits.validate_target_position(
+                plan.target_position_m
+            )
+            previous = self.motion_limits.joints.validate_position(
+                plan.current_joint_radians
+            )
+            for waypoint in plan.waypoints_radians:
+                previous = self.motion_limits.joints.validate_step(
+                    previous,
+                    waypoint,
+                )
+            target = self.motion_limits.joints.validate_position(
+                plan.target_joint_radians
+            )
+            if plan.waypoints_radians:
+                final_waypoint = tuple(plan.waypoints_radians[-1])
+                if any(
+                    abs(actual - expected) > 1e-12
+                    for actual, expected in zip(
+                        final_waypoint,
+                        target,
+                        strict=True,
+                    )
+                ):
+                    raise ValueError("关节计划的最后轨迹点不是计划终点。")
+            elif any(
+                abs(actual - expected) > 1e-12
+                for actual, expected in zip(
+                    previous,
+                    target,
+                    strict=True,
+                )
+            ):
+                raise ValueError("非零关节计划缺少轨迹点。")
+
+            self._last_motion_plan = plan
+            self._execute_motion_plan_locked(plan)
+
     def _raise_if_motion_planning_disabled(self) -> None:
         if self.kinematics is None or self.motion_limits is None:
             raise SO100PlusMotionPlanningDisabledError(

@@ -44,7 +44,7 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 | `ArmHandlers` / `ArmAdapter` | 已实现 | 是 |
 | `MockArmAdapter` | 已实现 | 是，默认后端 |
 | `SO100PlusAdapter` | 已实现并经过真机验证 | 是，必须显式选择真机并确认风险 |
-| SO-100 Plus FK、IK、TCP 和关节路径 | 已实现 | 是，由真机运行时装配 |
+| SO-100 Plus FK、IK、TCP、会话状态和受控转换轨迹 | 已实现；转换路径仍需现场复验 | 是，由真机运行时装配 |
 | 当前 `right_follower` 正式工作空间 | 已登记 `12 × 6 × 12 cm` 固定姿态可达长方体 | 可通过专用 Skill 构造函数使用 |
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
 | USB 摄像头接口 | 软件接口和 FakeCamera 测试完成 | 否，真实单帧尚未验收 |
@@ -135,14 +135,37 @@ PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
 
 真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认、端口不是 `/dev/lerobot_right`，或校准文件 SHA-256 与已认证的 `right_follower.json` 不一致时，程序会在创建 Robot 和访问串口之前拒绝启动。
 
-连接后，入口会读取六个手臂关节并用 FK 打印当前 TCP。只有启动 TCP
-位于 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 内，并且关节姿态满足
-原真机验收脚本 `MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 采用的启动门槛时，JSON
-`move_arm` 才保持启用。TCP 或关节姿态任一不符合时，运行时会失败关闭
-`move_arm` 并打印原因。此时 `stop`、
-`open_gripper` 和 `close_gripper` 仍可使用。当前统一入口不会猜测或自动
-执行 `follower_rest → JoyCon 初始工作姿态` 的展开轨迹；使用已单独
-验收的流程进入工作区后，需要重新启动统一入口，启动门禁才会重新判断。
+连接后，入口会读取六个手臂关节并用 FK 计算当前 TCP，再把同一个运行
+会话分类为 `REST`、`WORK` 或 `UNVERIFIED`，不会默认机械臂一定在
+`follower_rest`：
+
+```text
+REST
+→ unfold_arm
+→ WORK
+→ move_arm / open_gripper / close_gripper
+→ fold_arm
+→ REST
+```
+
+`unfold_arm` 会从当次实际读取且通过容差检查的 `follower_rest` 关节角
+规划 `follower_rest → storage_escape → JoyCon 工作初始姿态`。整条
+关节轨迹必须先通过生产模块中的 MuJoCo 碰撞、接触、TCP 方向和关节限制
+预检查，全部通过后才会发送第一个运动目标；Adapter 执行的是刚刚通过
+验证的同一组 `JointMotionPlan`，不会在 `move_to()` 中重新规划。
+
+`fold_arm` 会读取当前实际 WORK 姿态，规划并逐点验证返回 JoyCon 工作
+初始姿态的完整轨迹。实际反馈再次通过工作初始姿态门禁后，才会规划、
+验证并执行 `工作初始姿态 → storage_escape → follower_rest`。工作初始点
+的 X 比正式工作框下限小约 1 cm，它只对这两个固定状态转换开放；普通
+`move_arm` 的正式 `12 × 6 × 12 cm` 工作空间没有扩大。
+
+如果启动姿态为 `REST`，会话正常启动，但只允许 `unfold_arm` 和
+`stop`；如果为 `WORK`，才允许普通工作区运动和 `fold_arm`；如果为
+`UNVERIFIED`，所有运动失败关闭。工作初始姿态仍采用原真机验收脚本
+`MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 的启动门槛，不代表六关节任意
+`±5°` 组合都已经过真机验证。MuJoCo、模型或认证配置不可用时同样失败
+关闭，不会跳过轨迹检查。
 
 输入 `exit`、输入结束或按下 Ctrl+C 时，运行时会：
 
@@ -163,13 +186,9 @@ stop()
 python -m pytest -q
 ```
 
-当前仓库验证结果：
-
-```text
-265 passed
-```
-
-默认测试全部使用 Mock、FakeRobot、FakeBus 或 FakeCamera，不打开真实串口和视频设备。
+默认测试全部使用 Mock、FakeRobot、FakeBus、FakeCamera 或纯内存
+MuJoCo 接触替身，不打开真实串口和视频设备。测试数量不在文档中硬编码；
+以当前提交实际执行 `python -m pytest -q` 的输出为准。
 
 ## 3. 整体架构和思维导图
 
@@ -725,6 +744,9 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 - FK、IK、TCP 和路径规划；
 - SO-100 Plus Factory 与校准预检；
 - Adapter 连接、运动、夹爪、停止和卸力；
+- REST/TRANSITION/WORK/UNVERIFIED 会话状态与 unfold/fold 放行规则；
+- 展开、返回工作初始点和反向收纳的完整 MuJoCo 轨迹预检查；
+- 预检查失败零运动、验证计划与执行计划一致、转换中 stop；
 - 30 Hz 流式轨迹、跟踪误差、负载、温度和最终到位保护；
 - 摄像头 Factory、独立生命周期和图像形状；
 - 校准 SHA-256 绑定、启动 TCP 与认证关节姿态门禁；
@@ -859,13 +881,15 @@ rosclaw-mini/
 | `src/rosclaw_mini/runtime.py` | 装配 Mock/真机 Adapter、Skills、Controller，并执行 stop→disconnect 关闭 |
 | `src/rosclaw_mini/execution/controller.py` | 后台运行一个普通命令，并允许独立 stop 请求 |
 | `src/rosclaw_mini/gateway/command/gateway.py` | 编排 Skill 查找、校验、安全检查和执行 |
-| `src/rosclaw_mini/skills/arm_skills.py` | 定义五个机械臂 Skill 和正式 right-follower 构造函数 |
+| `src/rosclaw_mini/skills/arm_skills.py` | 定义机械臂 Skill、会话转换 Skill 和正式 right-follower 构造函数 |
 | `src/rosclaw_mini/skills/arm_handler.py` | 把 Skill 映射到 Adapter 原子操作 |
 | `src/rosclaw_mini/safety/checker.py` | 通用读取 `ParamSpec` 检查命令 |
 | `src/rosclaw_mini/safety/limits.py` | 工作空间、关节限制、运动限制和正式真机范围 |
 | `src/rosclaw_mini/arm/base.py` | 定义统一 `ArmAdapter` |
 | `src/rosclaw_mini/arm/mock_arm.py` | 无硬件 Mock 实现 |
 | `src/rosclaw_mini/arm/so100_plus.py` | 真机 Adapter、运行配置、轨迹和保护 |
+| `src/rosclaw_mini/arm/so100_plus_session.py` | 真机会话状态、展开/收纳编排和状态门禁 |
+| `src/rosclaw_mini/arm/so100_plus_trajectory_validation.py` | 可复用的 MuJoCo 完整关节轨迹碰撞/接触预检查 |
 | `src/rosclaw_mini/arm/so100_plus_factory.py` | Robot/Camera 构造和连接前预检 |
 | `src/rosclaw_mini/arm/kinematics.py` | 驱动角转换、FK、IK、TCP 和纯数值路径 |
 | `docs/arm_actions.md` | 真机命令、风险、配置来源和实验记录 |
@@ -878,14 +902,16 @@ rosclaw-mini/
 真机控制：
 
 - 真机入口仍要求操作者在场并显式确认风险，不适合无人值守；
-- 统一入口尚未实现经过验证的 `follower_rest → 工作区` 自动展开流程；
-  启动 TCP 或认证关节姿态不符合时会保留连接，但禁用 `move_arm`；
+- 统一入口已实现显式 `unfold_arm`/`fold_arm` 和离线 MuJoCo 完整轨迹
+  预检查，但这次代码变更没有执行真机，仍需现场复验展开、返回工作
+  初始点和反向收纳三段路径；
 - 启动门禁不能识别环境障碍物或人员；
 - 正式工作空间只覆盖当前固定姿态邻域，不是任意姿态的全局空间；
 - 除底座外，其余关节没有逐一完成当前安装条件下的物理边界认证；
 - `move_to()` 不能显式指定 roll、pitch、yaw；
 - `move_joints()` 是 Adapter 专用能力，尚未成为上层 Skill；
-- 没有生产级碰撞检测、视觉避障或独立硬件急停接口；
+- 有启动前的固定 MuJoCo 模型碰撞/接触预检查，但没有运行中的动态
+  障碍物检测、视觉避障或独立硬件急停接口；
 - 软件不能识别人体、线缆、未知障碍物和桌面边缘；
 - 教学版机械臂存在回差、重力下垂、轻微抖动和精度波动。
 
@@ -907,8 +933,9 @@ rosclaw-mini/
 
 1. 把串口、follower、校准和正式工作空间接入 `configs/*.yaml`，保留命令行覆盖；
 2. 补全可复现的 Python/Conda 安装说明和依赖声明；
-3. 为统一入口设计并单独验收 `follower_rest → 工作区 → follower_rest`
-   的显式转换动作，再考虑开放工作区外启动后的 `move_arm`；
+3. 在操作者在场、可立即断电的条件下，现场复验现有显式
+   `REST → unfold_arm → WORK → fold_arm → REST`，重点核对当次
+   follower_rest 展开、任意已认证 WORK 点返回初始点和反向收纳；
 4. 单独完成真实摄像头一帧验证，不要求机械臂同时连接；
 5. 增加统一结构化遥测日志和运行报告；
 6. 根据实际工位增加底座、桌面、线缆和障碍物模型；

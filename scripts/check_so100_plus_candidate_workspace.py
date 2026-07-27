@@ -21,10 +21,10 @@ from pathlib import Path
 import time
 from typing import Mapping, Sequence
 
-import mujoco
 import numpy as np
 
 from rosclaw_mini.arm.kinematics import (
+    JointMotionPlan,
     SO100_PLUS_JOYCON_INITIAL_RADIANS,
     SO100PlusKinematics,
 )
@@ -50,6 +50,10 @@ from rosclaw_mini.arm.so100_plus_session import (
     read_so100_plus_pose_snapshot as _read_pose_snapshot,
     validate_storage_rest_start,
     validate_work_initial_pose,
+)
+from rosclaw_mini.arm.so100_plus_trajectory_validation import (
+    SO100PlusMuJoCoTrajectoryValidator,
+    StorageTransitionDirection,
 )
 from rosclaw_mini.safety.limits import (
     AxisLimits,
@@ -504,32 +508,47 @@ def read_only_preflight(
             follower_bus.disconnect()
 
 
-def _contact_body_pairs(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-) -> frozenset[tuple[str, str]]:
-    pairs = set()
-    for contact_index in range(data.ncon):
-        contact = data.contact[contact_index]
-        first_body_id = int(model.geom_bodyid[int(contact.geom1)])
-        second_body_id = int(model.geom_bodyid[int(contact.geom2)])
-        pairs.add(
-            (
-                mujoco.mj_id2name(
-                    model,
-                    mujoco.mjtObj.mjOBJ_BODY,
-                    first_body_id,
-                )
-                or "world",
-                mujoco.mj_id2name(
-                    model,
-                    mujoco.mjtObj.mjOBJ_BODY,
-                    second_body_id,
-                )
-                or "world",
-            )
+def _linear_joint_plan(
+    start_joint_radians: Sequence[float],
+    target_joint_radians: Sequence[float],
+    kinematics: SO100PlusKinematics,
+) -> JointMotionPlan:
+    """构造验收脚本原有的 1° 直线关节计划。"""
+
+    start = _finite_tuple(
+        start_joint_radians,
+        length=len(SO100_PLUS_ARM_JOINT_NAMES),
+        label="路径起点关节角",
+    )
+    target = _finite_tuple(
+        target_joint_radians,
+        length=len(SO100_PLUS_ARM_JOINT_NAMES),
+        label="路径终点关节角",
+    )
+    delta = tuple(
+        end - begin
+        for begin, end in zip(start, target, strict=True)
+    )
+    step_count = max(
+        1,
+        math.ceil(
+            max(abs(value) for value in delta)
+            / SIMULATION_STEP_RADIANS
+        ),
+    )
+    waypoints = tuple(
+        tuple(
+            begin + change * (step_index / step_count)
+            for begin, change in zip(start, delta, strict=True)
         )
-    return frozenset(pairs)
+        for step_index in range(1, step_count + 1)
+    )
+    return JointMotionPlan(
+        target_position_m=kinematics.forward_position(target),
+        current_joint_radians=start,
+        target_joint_radians=target,
+        waypoints_radians=waypoints,
+    )
 
 
 def validate_storage_to_initial_transition(
@@ -544,60 +563,39 @@ def validate_storage_to_initial_transition(
         start_joint_radians,
         kinematics,
     )
-    start = np.asarray(
-        shared_transition.storage_joint_radians,
-        dtype=float,
+    plans = (
+        _linear_joint_plan(
+            shared_transition.storage_joint_radians,
+            shared_transition.escape_joint_radians,
+            kinematics,
+        ),
+        _linear_joint_plan(
+            shared_transition.escape_joint_radians,
+            shared_transition.work_joint_radians,
+            kinematics,
+        ),
     )
-    target = np.asarray(shared_transition.work_joint_radians, dtype=float)
-    path = np.asarray(
-        shared_transition.path_joint_radians,
-        dtype=float,
+    verified = SO100PlusMuJoCoTrajectoryValidator(
+        model_path=model_path
+    ).verify_storage_transition(
+        plans,
+        escape_joint_radians=(
+            shared_transition.escape_joint_radians
+        ),
+        kinematics=kinematics,
+        direction=StorageTransitionDirection.UNFOLD,
     )
+    path = np.asarray(verified.sampled_joint_radians, dtype=float)
     positions = np.asarray(
-        shared_transition.path_positions_m,
+        [kinematics.forward_position(joints) for joints in path],
         dtype=float,
     )
+    start = path[0]
+    target = path[-1]
     max_joint_change = float(np.max(np.abs(target - start)))
-
-    model = mujoco.MjModel.from_xml_path(str(model_path))
-    data = mujoco.MjData(model)
-    initial_pairs: frozenset[tuple[str, str]] | None = None
-    contact_steps = []
-    for step_index, joints in enumerate(path):
-        data.qpos[:6] = joints
-        data.qpos[6] = -0.157
-        mujoco.mj_forward(model, data)
-        pairs = _contact_body_pairs(model, data)
-        if initial_pairs is None:
-            initial_pairs = pairs
-        new_pairs = pairs - initial_pairs
-        if new_pairs:
-            raise RuntimeError(
-                "展开路径出现收纳姿态中不存在的新接触："
-                f"{sorted(new_pairs)}。"
-            )
-        if pairs:
-            contact_steps.append(step_index)
-
-    if data.ncon:
-        raise RuntimeError("JoyCon 初始工作姿态仍存在模型接触。")
-    escape = np.asarray(
-        shared_transition.escape_joint_radians,
-        dtype=float,
-    )
-    data.qpos[:6] = escape
-    data.qpos[6] = -0.157
-    mujoco.mj_forward(model, data)
-    if data.ncon:
-        escape_pairs = _contact_body_pairs(model, data)
-        raise RuntimeError(
-            "20% 脱离贴靠姿态仍存在模型接触："
-            f"{sorted(escape_pairs)}。"
-        )
-
     segment_lengths = np.linalg.norm(np.diff(positions, axis=0), axis=1)
     return TransitionValidation(
-        escape_joint_radians=tuple(float(value) for value in escape),
+        escape_joint_radians=shared_transition.escape_joint_radians,
         target_joint_radians=tuple(float(value) for value in target),
         path_positions_m=tuple(
             tuple(float(value) for value in position)
@@ -608,8 +606,10 @@ def validate_storage_to_initial_transition(
             np.linalg.norm(positions[-1] - positions[0])
         ),
         cartesian_path_length_m=float(np.sum(segment_lengths)),
-        initial_contact_pair_count=len(initial_pairs or ()),
-        last_contact_step=max(contact_steps) if contact_steps else -1,
+        initial_contact_pair_count=len(
+            verified.report.initial_contact_pairs
+        ),
+        last_contact_step=verified.report.last_contact_sample,
     )
 
 
@@ -635,60 +635,27 @@ def validate_collision_free_joint_path(
 ) -> CollisionFreePathValidation:
     """按当次实测起点检查无接触、且 TCP 不低于 Z=0 的关节路径。"""
 
-    start = np.asarray(
-        _finite_tuple(
-            start_joint_radians,
-            length=len(SO100_PLUS_ARM_JOINT_NAMES),
-            label="路径起点关节角",
-        ),
-        dtype=float,
+    plan = _linear_joint_plan(
+        start_joint_radians,
+        target_joint_radians,
+        kinematics,
     )
-    target = np.asarray(
-        _finite_tuple(
-            target_joint_radians,
-            length=len(SO100_PLUS_ARM_JOINT_NAMES),
-            label="路径终点关节角",
-        ),
-        dtype=float,
-    )
-    delta = target - start
-    step_count = max(
-        1,
-        math.ceil(
-            float(np.max(np.abs(delta))) / SIMULATION_STEP_RADIANS
-        ),
-    )
-    fractions = np.arange(step_count + 1, dtype=float) / step_count
-    path = start + fractions[:, np.newaxis] * delta
+    verified = SO100PlusMuJoCoTrajectoryValidator(
+        model_path=model_path
+    ).verify_collision_free_sequence((plan,), kinematics)
+    path = np.asarray(verified.sampled_joint_radians, dtype=float)
     positions = np.asarray(
         [kinematics.forward_position(joints) for joints in path],
         dtype=float,
     )
     minimum_z = float(np.min(positions[:, 2]))
-    if minimum_z < 0.0:
-        raise RuntimeError(
-            f"当次实测姿态路径的 TCP 最低 Z={minimum_z:.6f} m，"
-            "低于支撑平面。"
-        )
-
-    model = mujoco.MjModel.from_xml_path(str(model_path))
-    data = mujoco.MjData(model)
-    for step_index, joints in enumerate(path):
-        data.qpos[:6] = joints
-        data.qpos[6] = -0.157
-        mujoco.mj_forward(model, data)
-        if data.ncon:
-            raise RuntimeError(
-                f"当次实测姿态路径第 {step_index}/{step_count} 个"
-                f"检查点存在 {data.ncon} 个模型接触。"
-            )
 
     cartesian_steps = np.linalg.norm(
         np.diff(positions, axis=0),
         axis=1,
     )
     return CollisionFreePathValidation(
-        step_count=step_count,
+        step_count=max(len(path) - 1, 0),
         max_cartesian_step_m=float(np.max(cartesian_steps)),
         minimum_tcp_z_m=minimum_z,
     )

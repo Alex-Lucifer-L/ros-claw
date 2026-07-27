@@ -1088,6 +1088,30 @@ def test_move_joints_executes_checked_joint_plan_and_preserves_gripper():
     )
 
 
+def test_execute_joint_plan_uses_prechecked_plan_without_replanning():
+    robot = FakeRobot()
+    kinematics = FakeMotionKinematics()
+    adapter = make_adapter(
+        robot,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(),
+    )
+    adapter.connect()
+    prechecked_plan = kinematics.plan
+
+    adapter.execute_joint_plan(prechecked_plan)
+
+    assert adapter.last_motion_plan is prechecked_plan
+    assert kinematics.plan_calls == []
+    assert kinematics.plan_joint_calls == []
+    assert goal_write_calls(robot)[-1] == (
+        "Goal_Position",
+        [11.0, 21.0, 31.0, 41.0, 51.0, 61.0, -5.0],
+        None,
+    )
+
+
 def test_move_to_holds_measured_position_when_joint_misses_target():
     robot = FakeRobot()
     robot.bus.arm_position_error_degrees = 3.01

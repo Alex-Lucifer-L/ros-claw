@@ -123,6 +123,38 @@ def test_right_follower_gateway_uses_formal_workspace_boundaries():
     assert "x" in rejected.message
 
 
+def test_work_initial_and_transition_envelope_cannot_bypass_move_workspace():
+    right_adapter = MockArmAdapter()
+    right_skills = build_so100_plus_right_follower_arm_skills(right_adapter)
+
+    work_initial_endpoint = run_command(
+        make_command(
+            params={
+                "x": 0.3035714232672181,
+                "y": -0.0011854942801636243,
+                "z": 0.17932848288990053,
+            }
+        ),
+        right_skills,
+    )
+    transition_envelope_only = run_command(
+        make_command(
+            params={
+                "x": 0.20,
+                "y": -0.0011854942801636243,
+                "z": 0.10,
+            }
+        ),
+        right_skills,
+    )
+
+    assert work_initial_endpoint.success is False
+    assert "x" in work_initial_endpoint.message
+    assert transition_envelope_only.success is False
+    assert "x" in transition_envelope_only.message
+    assert right_adapter.position is None
+
+
 def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
     class StubSession:
         def __init__(self):
