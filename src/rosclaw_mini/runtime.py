@@ -127,6 +127,11 @@ class ArmRuntime:
         init=False,
         repr=False,
     )
+    _torque_disabled_on_shutdown: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -140,6 +145,8 @@ class ArmRuntime:
         """停止后限时等待后台动作；线程结束前绝不主动断开。"""
 
         with self._shutdown_lock:
+            if self._deferred_cleanup_error is not None:
+                raise self._deferred_cleanup_error
             if self._is_shutdown:
                 return
             if (
@@ -149,9 +156,6 @@ class ArmRuntime:
                 raise ArmRuntimeShutdownError(
                     "后台动作仍在运行；延后 disconnect 已安排，尚未完成。"
                 )
-            if self._deferred_cleanup_error is not None:
-                raise self._deferred_cleanup_error
-
             errors: list[str] = []
             connected_at_start = self.adapter.is_connected
 
@@ -191,8 +195,10 @@ class ArmRuntime:
             if connected_at_start and not self.adapter.is_connected:
                 errors.append("Adapter 在关闭过程中意外断开")
             elif self.adapter.is_connected:
+                self._disable_torque_if_rest(errors)
                 try:
-                    self.adapter.disconnect()
+                    if self.adapter.is_connected:
+                        self.adapter.disconnect()
                 except Exception as error:
                     errors.append(f"disconnect 失败：{error}")
 
@@ -209,6 +215,12 @@ class ArmRuntime:
         return self.session.state if self.session is not None else None
 
     @property
+    def torque_disabled_on_shutdown(self) -> bool:
+        """正常关闭是否已验证全部电机力矩关闭。"""
+
+        return self._torque_disabled_on_shutdown
+
+    @property
     def exit_pose_warning(self) -> str | None:
         """退出前提示未处于认证收纳姿态，但不阻止安全断开。"""
 
@@ -217,8 +229,21 @@ class ArmRuntime:
             return None
         return (
             f"退出提示：当前会话状态为 {state.value}，机械臂未处于"
-            "认证 follower_rest；不会自动展开或收纳，将只停止、等待并断开。"
+            "认证 follower_rest；不会自动展开、收纳或关闭力矩，"
+            "将只停止、等待并断开。"
         )
+
+    def _disable_torque_if_rest(self, errors: list[str]) -> None:
+        """仅在软件状态和真实反馈都确认收纳时正常卸力。"""
+
+        if self.session_state is not ArmSessionState.REST:
+            return
+        try:
+            self.adapter.disable_torque()
+        except Exception as error:
+            errors.append(f"REST 状态关闭力矩失败：{error}")
+        else:
+            self._torque_disabled_on_shutdown = True
 
     def _start_deferred_cleanup(self) -> None:
         """安排后台动作结束后的最终断开；调用方必须持有关闭锁。"""
@@ -248,10 +273,17 @@ class ArmRuntime:
             with self._shutdown_lock:
                 if self._is_shutdown:
                     return
+                cleanup_errors: list[str] = []
                 if self.adapter.is_connected:
-                    self.adapter.disconnect()
+                    self._disable_torque_if_rest(cleanup_errors)
+                    if self.adapter.is_connected:
+                        self.adapter.disconnect()
                 if not self.adapter.is_connected:
                     self._is_shutdown = True
+                if cleanup_errors:
+                    self._deferred_cleanup_error = ArmRuntimeShutdownError(
+                        "；".join(cleanup_errors) + "。"
+                    )
         except Exception as error:
             with self._shutdown_lock:
                 self._deferred_cleanup_error = ArmRuntimeShutdownError(

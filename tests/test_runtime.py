@@ -39,6 +39,7 @@ class RecordingAdapter(ArmAdapter):
         stop_event: Event | None = None,
         stop_error: Exception | None = None,
         disconnect_on_stop: bool = False,
+        disable_torque_error: Exception | None = None,
     ) -> None:
         self.connected = True
         self.calls: list[str] = []
@@ -46,6 +47,7 @@ class RecordingAdapter(ArmAdapter):
         self.stop_event = stop_event
         self.stop_error = stop_error
         self.disconnect_on_stop = disconnect_on_stop
+        self.disable_torque_error = disable_torque_error
 
     @property
     def is_connected(self) -> bool:
@@ -80,6 +82,8 @@ class RecordingAdapter(ArmAdapter):
 
     def disable_torque(self, *, emergency: bool = False) -> None:
         self.calls.append("disable_torque")
+        if self.disable_torque_error is not None:
+            raise self.disable_torque_error
 
 
 def _successful_result(command: Command) -> ExecutionResult:
@@ -154,6 +158,109 @@ def test_runtime_shutdown_stops_waits_and_disconnects_without_disabling_torque()
     # shutdown 可重复调用，但不会重复操作硬件。
     runtime.shutdown()
     assert adapter.calls == ["stop", "disconnect"]
+
+
+def test_runtime_shutdown_from_rest_disables_torque_before_disconnect():
+    adapter = RecordingAdapter()
+
+    class RestSession:
+        state = ArmSessionState.REST
+
+        def __init__(self):
+            self.calls = []
+
+        def request_stop(self):
+            self.calls.append("request_stop")
+
+    session = RestSession()
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=ExecutionController(_successful_result),
+        session=session,
+    )
+
+    runtime.shutdown()
+
+    assert session.calls == ["request_stop"]
+    assert adapter.calls == ["disable_torque", "disconnect"]
+    assert runtime.torque_disabled_on_shutdown is True
+    assert adapter.is_connected is False
+
+
+def test_runtime_shutdown_from_rest_disconnects_and_reports_torque_failure():
+    adapter = RecordingAdapter(
+        disable_torque_error=RuntimeError("模拟 follower_rest 复核失败"),
+    )
+
+    class RestSession:
+        state = ArmSessionState.REST
+
+        def request_stop(self):
+            return None
+
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=ExecutionController(_successful_result),
+        session=RestSession(),
+    )
+
+    with pytest.raises(
+        ArmRuntimeShutdownError,
+        match="REST 状态关闭力矩失败.*follower_rest 复核失败",
+    ):
+        runtime.shutdown()
+
+    assert adapter.calls == ["disable_torque", "disconnect"]
+    assert runtime.torque_disabled_on_shutdown is False
+    assert adapter.is_connected is False
+
+
+def test_deferred_shutdown_disables_torque_if_session_finishes_in_rest():
+    motion_started = Event()
+    allow_motion_finish = Event()
+
+    def runner(command: Command) -> ExecutionResult:
+        motion_started.set()
+        allow_motion_finish.wait(timeout=1.0)
+        return _successful_result(command)
+
+    adapter = RecordingAdapter()
+    controller = ExecutionController(runner)
+
+    class RestSession:
+        state = ArmSessionState.REST
+
+        def request_stop(self):
+            return None
+
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=controller,
+        session=RestSession(),
+        shutdown_wait_timeout_seconds=0.01,
+    )
+    command = Command(
+        command_id="deferred-rest-shutdown",
+        skill_name="query",
+        params={},
+        source="user",
+    )
+    assert controller.submit(command) is True
+    assert motion_started.wait(timeout=1.0) is True
+
+    with pytest.raises(ArmRuntimeShutdownError, match="未结束"):
+        runtime.shutdown()
+
+    assert adapter.calls == []
+    allow_motion_finish.set()
+    assert adapter.disconnect_event.wait(timeout=1.0) is True
+    runtime.shutdown()
+
+    assert adapter.calls == ["disable_torque", "disconnect"]
+    assert runtime.torque_disabled_on_shutdown is True
 
 
 def test_runtime_shutdown_waits_and_disconnects_after_stop_raises():
@@ -576,7 +683,8 @@ def test_so100_plus_runtime_recognizes_storage_feedback_as_rest(tmp_path):
     runtime.shutdown()
 
     assert adapters[2].calls == ["stop"]
-    assert adapters[1].calls == ["disconnect"]
+    assert adapters[1].calls == ["disable_torque", "disconnect"]
+    assert runtime.torque_disabled_on_shutdown is True
 
 
 def test_so100_plus_runtime_disables_move_arm_when_startup_tcp_is_outside_workspace(

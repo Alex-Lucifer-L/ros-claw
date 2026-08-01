@@ -178,13 +178,18 @@ REST
 ```text
 stop()
 → 最多等待后台动作 5 秒
+→ 若会话状态为 REST：重新读取并验证 follower_rest
+  → disable_torque()
+  → 读回确认 Torque_Enable 全部为 0
 → disconnect()
 ```
 
 即使 `stop()` 报错，运行时仍会限时等待后台 Controller。线程超时时不会
 立即调用 `disconnect()`，也不会报告安全完成；非 daemon 延后清理线程会
-继续使用有界等待，工作线程稍后结束后再完成 `disconnect()`。普通退出
-不会调用 `disable_torque()`。
+继续使用有界等待，工作线程稍后结束后再按同一规则完成清理。只有软件
+状态为 `REST` 且 Adapter 再次读取的真实关节仍符合 `follower_rest` 时，
+普通退出才自动关闭力矩；`WORK`、`TRANSITION`、`UNVERIFIED` 或真实
+姿态复核失败时不卸力，仍尝试断开并明确报告原因。
 
 ### 运行测试
 
@@ -617,6 +622,10 @@ adapter.disable_torque(emergency=True)
 ```
 
 紧急卸力不是自动收纳，也不能代替物理断电。
+
+统一入口退出时仅在会话已处于 `REST` 的前提下调用普通
+`disable_torque()`；Adapter 会再次执行上述真实关节检查和力矩读回确认。
+非 REST 状态不会为了卸力而自动展开或收纳。
 
 ## 9. 摄像头是独立可选功能
 

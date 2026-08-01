@@ -22,6 +22,7 @@ class FakeRuntime:
         self.shutdown_error = None
         self.current_tcp_position_m = None
         self.move_arm_disabled_reason = None
+        self.torque_disabled_on_shutdown = False
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -222,6 +223,7 @@ def test_main_reports_rest_session_without_treating_it_as_startup_failure():
     runtime = FakeRuntime()
     runtime.session_state = ArmSessionState.REST
     runtime.exit_pose_warning = None
+    runtime.torque_disabled_on_shutdown = True
     outputs: list[str] = []
 
     exit_code = main(
@@ -239,6 +241,7 @@ def test_main_reports_rest_session_without_treating_it_as_startup_failure():
     assert "SO-100 Plus 会话状态: REST" in outputs
     assert any("可执行 unfold_arm" in message for message in outputs)
     assert not any("启动失败" in message for message in outputs)
+    assert "机械臂已停止，力矩已关闭，后端连接已断开。" in outputs
 
 
 def test_main_warns_when_exit_does_not_start_from_rest():

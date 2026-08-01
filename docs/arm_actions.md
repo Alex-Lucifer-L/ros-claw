@@ -469,12 +469,14 @@ adapter.stop()
 `torque_disabled_emergency` 遥测，并要求人员托住机械臂。不能把
 `disconnect()` 当成关力矩，软件也不替代物理断电。
 
-统一 JSON 入口遵循另一条明确约束：普通退出或 Ctrl+C 只执行
-`stop() → 最多等待后台动作 5 秒 → disconnect()`，不自动调用
-`disable_torque()`。即使 `stop()` 报错，也会继续等待 Controller；后台
-线程超时时不会立即断开，也不报告安全完成；非 daemon 延后清理线程会
-继续以有界等待轮询，并在线程稍后结束后完成 `disconnect()`。是否收纳
-和卸力必须由操作者另行决定。
+统一 JSON 入口的普通退出或 Ctrl+C 先执行
+`stop() → 最多等待后台动作 5 秒`。后台动作真正结束后，若会话状态为
+`REST`，会再次读取并验证真实 `follower_rest`，再执行
+`disable_torque()`、读回确认全部 `Torque_Enable = 0`，最后
+`disconnect()`；非 REST 状态不会自动展开、收纳或卸力，只执行断开。
+即使 `stop()` 或 REST 卸力失败，也仍会尝试断开并向入口返回关闭错误，
+不能报告安全完成。后台线程超时时不会立即断开；非 daemon 延后清理线程
+会继续以有界等待轮询，并在线程稍后结束后采用同一状态规则完成清理。
 
 ### 当前 `stop` 的系统限制
 
@@ -686,7 +688,8 @@ JSON 示例：
 任何展开、返回初始点或收纳阶段的异常和 `stop` 中断都会把状态设为
 `UNVERIFIED`，不能根据原计划目标猜测已经到位。`exit` 不会从 WORK 或
 未知姿态自动收纳；它会提示当前不在认证 follower_rest，然后仍然停止、
-等待后台动作真正结束并断开。普通退出不会自动调用 `disable_torque()`。
+等待后台动作真正结束并断开，也不会关闭力矩。只有退出时已经为 `REST`
+且真实反馈复核仍通过，才会自动调用普通 `disable_torque()`。
 
 `build_so100_plus_right_follower_arm_skills(adapter)` 会把
 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS` 写入 `move_arm` 的
@@ -854,13 +857,11 @@ python scripts/tune_so100_plus_pid.py \
 - 初级教学版机械臂有回差、重力下垂和精度波动，当前 `12 mm` 是项目
   运行验收容差，不是厂商精度声明。
 - 真实摄像头已识别并完成软件接入，但尚未抓取单帧。
-- `main.py` 的真机连接、普通退出、Ctrl+C、`stop`、夹爪动作和不自动
-  卸力已经由操作者完成实机检查；统一入口的 REST/WORK 状态识别和
-  `unfold_arm`/`fold_arm` 自动测试已经完成，但新增的完整会话编排尚需
-  操作者进行一次现场验收。需要人工复验的路径包括：当次实际
-  follower_rest 展开到工作初始姿态、正式 WORK 框代表位置返回工作
-  初始姿态，以及工作初始姿态反向收纳到 follower_rest。默认后端仍是
-  Mock。
+- 统一入口已经由操作者完成一次
+  `REST → unfold_arm → WORK → 两个内部代表点与夹爪开合 → fold_arm
+  → REST → disconnect` 真机闭环验收。随后也完成了“REST 启动后直接
+  退出”的真机验收：退出时再次通过 follower_rest 复核，写入并读回确认
+  全部 `Torque_Enable = 0`，机械臂变软后正常断开。默认后端仍是 Mock。
 - 早期连接、夹爪和 stop 手动脚本会在退出时明确警告
   `disconnect()` 不是关力矩；正式 `move_to` 脚本已执行完整的关力矩清理。
 - 摄像头已经与机械臂生命周期解耦，但真实摄像头单帧仍未验证。

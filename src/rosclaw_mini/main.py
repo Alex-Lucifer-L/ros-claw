@@ -202,7 +202,10 @@ def main(
         output_func(f"停止或断开失败: {shutdown_error}")
         return 1
 
-    output_func("机械臂已停止，后端连接已断开；未自动关闭力矩。")
+    if getattr(runtime, "torque_disabled_on_shutdown", False):
+        output_func("机械臂已停止，力矩已关闭，后端连接已断开。")
+    else:
+        output_func("机械臂已停止，后端连接已断开；未自动关闭力矩。")
     return exit_code
 
 
