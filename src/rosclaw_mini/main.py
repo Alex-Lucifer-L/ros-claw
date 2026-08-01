@@ -18,9 +18,9 @@ from rosclaw_mini.runtime import (
 )
 
 
-InputFunction = Callable[[str], str]
-OutputFunction = Callable[[str], None]
-RuntimeBuilder = Callable[[argparse.Namespace], ArmRuntime]
+InputFunction = Callable[[str], str]###定义了一个类型别名 InputFunction，它表示一个可调用对象（函数或方法），该对象接受一个字符串参数并返回一个字符串。这个类型别名用于表示输入函数的签名，通常用于从用户获取输入。
+OutputFunction = Callable[[str], None]###定义了一个类型别名 OutputFunction，它表示一个可调用对象（函数或方法），该对象接受一个字符串参数并返回 None。这个类型别名用于表示输出函数的签名，通常用于向用户显示输出信息。
+RuntimeBuilder = Callable[[argparse.Namespace], ArmRuntime]###定义了一个类型别名 RuntimeBuilder，它表示一个可调用对象（函数或方法），该对象接受一个 argparse.Namespace 对象作为参数并返回一个 ArmRuntime 对象。这个类型别名用于表示运行时构建器的签名，通常用于根据命令行参数创建和配置 ArmRuntime 实例。
 
 
 def build_parser() -> argparse.ArgumentParser:
