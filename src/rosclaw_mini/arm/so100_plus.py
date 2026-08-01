@@ -1042,6 +1042,45 @@ class SO100PlusAdapter(ArmAdapter):
             motor_names, held_positions = self._read_all_positions_locked(
                 follower_bus
             )
+            actual_arm_driver_degrees = self._arm_values_by_name(
+                motor_names,
+                held_positions,
+            )
+            actual_joint_radians = (
+                self.kinematics.driver_degrees_to_model_radians(
+                    actual_arm_driver_degrees
+                )
+            )
+            start_errors_degrees = tuple(
+                abs(math.degrees(actual - expected))
+                for actual, expected in zip(
+                    actual_joint_radians,
+                    plan.current_joint_radians,
+                    strict=True,
+                )
+            )
+            start_tolerance_degrees = (
+                self.motion_config.joint_position_tolerance_degrees
+            )
+            violating_start_indices = tuple(
+                index
+                for index, error in enumerate(start_errors_degrees)
+                if error > start_tolerance_degrees
+            )
+            if violating_start_indices:
+                index = max(
+                    violating_start_indices,
+                    key=start_errors_degrees.__getitem__,
+                )
+                raise SO100PlusArmSafetyError(
+                    "关节计划执行前起点复核失败："
+                    f"{SO100_PLUS_ARM_JOINT_NAMES[index]} 计划 "
+                    f"{math.degrees(plan.current_joint_radians[index]):.6f}°、"
+                    f"实测 {math.degrees(actual_joint_radians[index]):.6f}°，"
+                    f"偏差 {start_errors_degrees[index]:.6f}° 超过现有 "
+                    f"{start_tolerance_degrees:.1f}° 关节位置容差；"
+                    "未发送任何运动目标。"
+                )
             if plan.held_gripper_driver_degrees is not None:
                 try:
                     gripper_index = motor_names.index(GRIPPER_MOTOR_NAME)

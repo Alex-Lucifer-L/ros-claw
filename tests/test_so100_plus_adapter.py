@@ -1120,6 +1120,67 @@ def test_execute_joint_plan_uses_prechecked_plan_without_replanning():
     )
 
 
+def test_execute_joint_plan_rejects_changed_actual_start_before_motor_write():
+    robot = FakeRobot()
+    kinematics = FakeMotionKinematics()
+    adapter = make_adapter(
+        robot,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(),
+    )
+    adapter.connect()
+    final_plan = adapter.materialize_joint_plan(
+        kinematics.plan,
+        held_gripper_driver_degrees=-5.0,
+    )
+    validator = object.__new__(SO100PlusMuJoCoTrajectoryValidator)
+    validator._gripper_qpos_range = (-0.2, 2.0)
+    validator._sample_contacts = lambda samples, gripper_qpos: tuple(
+        frozenset() for _ in samples
+    )
+    prechecked_plan = validator.verify_collision_free_sequence(
+        (final_plan,),
+        kinematics,
+        gripper_qpos=math.radians(-5.0),
+    ).plans[0]
+    robot.bus.all_positions[2] += 6.0
+
+    with pytest.raises(
+        SO100PlusArmSafetyError,
+        match=(
+            "执行前起点复核失败.*ellbow_joint.*"
+            "超过现有 3.0° 关节位置容差.*未发送任何运动目标"
+        ),
+    ):
+        adapter.execute_joint_plan(prechecked_plan)
+
+    assert goal_write_calls(robot) == []
+
+
+def test_execute_joint_plan_accepts_matching_actual_start_and_moves():
+    robot = FakeRobot()
+    kinematics = FakeMotionKinematics()
+    adapter = make_adapter(
+        robot,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(),
+    )
+    adapter.connect()
+    prechecked_plan = adapter.materialize_joint_plan(kinematics.plan)
+
+    adapter.execute_joint_plan(prechecked_plan)
+
+    writes = goal_write_calls(robot)
+    assert len(writes) == len(prechecked_plan.waypoints_radians)
+    assert writes[-1] == (
+        "Goal_Position",
+        [11.0, 21.0, 31.0, 41.0, 51.0, 61.0, -5.0],
+        None,
+    )
+
+
 def test_streaming_motor_targets_exactly_match_final_prechecked_waypoints():
     robot = FakeRobot()
     kinematics = FakeMotionKinematics()
@@ -1667,7 +1728,6 @@ def test_move_to_streams_cosine_targets_without_stopping_at_each_waypoint():
 
 def test_streaming_motion_holds_when_live_tracking_error_is_too_large():
     robot = FakeRobot()
-    robot.bus.arm_position_error_degrees = 6.0
     kinematics = FakeMotionKinematics()
     adapter = make_adapter(
         robot,
@@ -1679,6 +1739,8 @@ def test_streaming_motion_holds_when_live_tracking_error_is_too_large():
         ),
     )
     adapter.connect()
+    # 起点保持匹配，只在第一条流式目标写入后注入跟踪误差。
+    robot.bus.arm_position_error_degrees = 6.0
 
     with pytest.raises(SO100PlusArmSafetyError, match="流式轨迹关节"):
         adapter.move_to(0.3, 0.0, 0.2)
