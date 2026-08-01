@@ -4,6 +4,7 @@ from threading import Thread, Lock
 
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 CommandRunner = Callable[[Command], ExecutionResult]###表示一个可调用对象（函数或方法），它接受一个 Command 对象并返回一个 ExecutionResult 对象。这个类型别名用于表示执行命令的逻辑。
+CommandLifecycleHook = Callable[[Command], None]
 
 class ExecutionController:
     """
@@ -12,7 +13,13 @@ class ExecutionController:
     runner: 一个可调用对象（函数或方法），它接受一个 Command 对象并返回一个 ExecutionResult 对象。这个 runner 实际上是执行命令的逻辑。
     worker: 一个线程对象，用于在后台执行命令。初学者可以将其理解为一个“工作线程”，它负责实际运行命令。
     """
-    def __init__(self, runner: CommandRunner):
+    def __init__(
+        self,
+        runner: CommandRunner,
+        *,
+        before_submit: CommandLifecycleHook | None = None,
+        after_finish: CommandLifecycleHook | None = None,
+    ):
         """
         初始化 ExecutionController。
         runner: 一个可调用对象（函数或方法），它接受一个 Command 对象并返回一个 ExecutionResult 对象。这个 runner 实际上是执行命令的逻辑。
@@ -22,6 +29,8 @@ class ExecutionController:
         last_result: 一个 ExecutionResult 对象，保存上一次命令的执行结果。初学者可以将其理解为一个“结果缓存”，它存储了上一次命令执行的结果，以便后续使用。
         """
         self._runner = runner
+        self._before_submit = before_submit
+        self._after_finish = after_finish
         self._worker: Thread | None = None
         self._running: bool = False
         self._lock = Lock()
@@ -38,6 +47,11 @@ class ExecutionController:
         with self._lock:
             if self._running:
                 return False
+            # 必须在 running 变为 True 以前初始化新动作的
+            # stop 世代。submit 返回后到达的 stop 就不会被工作
+            # 线程再次清除。
+            if self._before_submit is not None:
+                self._before_submit(command)
             self._running = True
             self._last_result = None
             self._worker = Thread(target=self._run_in_background, args=(command,))
@@ -73,6 +87,16 @@ class ExecutionController:
                 message=str(error)
             )
         finally:
+            if self._after_finish is not None:
+                try:
+                    self._after_finish(command)
+                except Exception as error:
+                    result = ExecutionResult(
+                        command_id=command.command_id,
+                        skill_name=command.skill_name,
+                        success=False,
+                        message=f"动作结束清理失败：{error}",
+                    )
             with self._lock:
                 self._running = False
                 self._last_result = result

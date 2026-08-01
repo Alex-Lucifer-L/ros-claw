@@ -29,6 +29,9 @@ SO100_PLUS_JOYCON_REST_RADIANS = SO100_PLUS_JOYCON_INITIAL_RADIANS
 # Y/Z 来自 MuJoCo 两根夹指最前端内侧接触面的共同高度中心和间隙中点。
 # 三者共同描述第六关节运动学末端到固定夹持中心的工具局部坐标。
 SO100_PLUS_GRIPPER_TCP_OFFSET_M = (0.10127, -0.00690, 0.00118)
+# MuJoCo 碰撞预检与执行器共用的最大相邻执行点距离。最终
+# JointMotionPlan 在预检前就必须满足它，执行期间不再插值。
+SO100_PLUS_COLLISION_EXECUTION_STEP_RADIANS = math.radians(1.0)
 
 
 class KinematicsError(RuntimeError):
@@ -51,6 +54,9 @@ class JointMotionPlan:
     current_joint_radians: tuple[float, ...]
     target_joint_radians: tuple[float, ...]
     waypoints_radians: tuple[tuple[float, ...], ...]
+    is_final_execution_plan: bool = False
+    waypoint_interval_seconds: float | None = None
+    held_gripper_driver_degrees: float | None = None
 
 
 def _finite_vector(

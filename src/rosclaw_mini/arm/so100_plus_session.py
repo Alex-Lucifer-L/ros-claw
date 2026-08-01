@@ -18,7 +18,10 @@ from rosclaw_mini.arm.kinematics import (
     SO100_PLUS_JOYCON_INITIAL_RADIANS,
     SO100PlusKinematics,
 )
-from rosclaw_mini.arm.so100_plus import SO100_PLUS_REAL_HARDWARE_PROFILE
+from rosclaw_mini.arm.so100_plus import (
+    GRIPPER_MOTOR_NAME,
+    SO100_PLUS_REAL_HARDWARE_PROFILE,
+)
 from rosclaw_mini.arm.so100_plus_trajectory_validation import (
     SO100PlusMuJoCoTrajectoryValidator,
     StorageTransitionDirection,
@@ -60,6 +63,7 @@ class SO100PlusPoseSnapshot:
     driver_degrees: tuple[float, ...]
     joint_radians: tuple[float, ...]
     tcp_position_m: tuple[float, float, float]
+    gripper_driver_degrees: float | None = None
     torque_enabled: tuple[int, ...] = ()
 
 
@@ -82,6 +86,17 @@ class SO100PlusSessionAdapter(Protocol):
     def move_joints(self, joint_radians: Sequence[float]) -> None: ...
 
     def execute_joint_plan(self, plan: JointMotionPlan) -> None: ...
+
+    def materialize_joint_plan(
+        self,
+        plan: JointMotionPlan,
+        *,
+        held_gripper_driver_degrees: float | None = None,
+    ) -> JointMotionPlan: ...
+
+    def begin_motion_action(self) -> None: ...
+
+    def end_motion_action(self) -> None: ...
 
     def open_gripper(self) -> None: ...
 
@@ -130,7 +145,7 @@ def read_so100_plus_pose_snapshot(
     position_by_name = dict(zip(motor_names, positions, strict=True))
     missing = tuple(
         name
-        for name in SO100_PLUS_ARM_JOINT_NAMES
+        for name in (*SO100_PLUS_ARM_JOINT_NAMES, GRIPPER_MOTOR_NAME)
         if name not in position_by_name
     )
     if missing:
@@ -139,6 +154,9 @@ def read_so100_plus_pose_snapshot(
     driver_degrees = tuple(
         position_by_name[name] for name in SO100_PLUS_ARM_JOINT_NAMES
     )
+    gripper_driver_degrees = position_by_name[GRIPPER_MOTOR_NAME]
+    if not math.isfinite(gripper_driver_degrees):
+        raise RuntimeError("夹爪位置反馈不是有限数值。")
     joint_radians = tuple(
         kinematics.driver_degrees_to_model_radians(driver_degrees)
     )
@@ -151,6 +169,7 @@ def read_so100_plus_pose_snapshot(
         driver_degrees=driver_degrees,
         joint_radians=joint_radians,
         tcp_position_m=tuple(kinematics.forward_position(joint_radians)),
+        gripper_driver_degrees=gripper_driver_degrees,
         torque_enabled=torque_enabled,
     )
 
@@ -411,6 +430,7 @@ class SO100PlusArmSession:
         self._lock = RLock()
         self._active_adapter: SO100PlusSessionAdapter | None = None
         self._active_transition: str | None = None
+        self._prepared_command_id: str | None = None
         self._transition_interrupted = False
         self._state, self._state_reason = classify_so100_plus_startup_pose(
             initial_snapshot,
@@ -461,9 +481,20 @@ class SO100PlusArmSession:
         command: Command,
         allowed: ArmSessionState,
     ) -> ExecutionResult | None:
-        current = self.state
+        with self._lock:
+            current = self._state
+            interrupted = (
+                self._transition_interrupted
+                and self._prepared_command_id == command.command_id
+            )
         if current is allowed:
             return None
+        if interrupted:
+            return self._failure(
+                command,
+                f"{command.skill_name} 在执行首条运动指令前"
+                "已被 stop 中断；当前状态为 UNVERIFIED。",
+            )
         return self._failure(
             command,
             f"{command.skill_name} 只允许在 {allowed.value} 状态执行；"
@@ -475,18 +506,70 @@ class SO100PlusArmSession:
         adapter: SO100PlusSessionAdapter,
         *,
         transition_name: str | None = None,
+        command: Command | None = None,
     ) -> None:
         with self._lock:
+            if self._active_adapter is not None:
+                if (
+                    self._active_adapter is adapter
+                    and command is not None
+                    and self._prepared_command_id == command.command_id
+                ):
+                    return
+                raise RuntimeError("会话中已有注册的机械臂动作。")
+            adapter.begin_motion_action()
             self._active_adapter = adapter
             self._active_transition = transition_name
+            self._prepared_command_id = (
+                command.command_id if command is not None else None
+            )
             if transition_name is not None:
                 self._transition_interrupted = False
 
     def _deactivate(self, adapter: SO100PlusSessionAdapter) -> None:
+        should_end = False
         with self._lock:
             if self._active_adapter is adapter:
                 self._active_adapter = None
                 self._active_transition = None
+                self._prepared_command_id = None
+                should_end = True
+        if should_end:
+            adapter.end_motion_action()
+
+    def prepare_command(self, command: Command) -> None:
+        """Controller 在标记提交前注册动作的 stop 世代。"""
+
+        if command.skill_name in {"move_arm", "open_gripper", "close_gripper"}:
+            if self.state is ArmSessionState.WORK:
+                self._activate(self._work_adapter, command=command)
+            return
+        if command.skill_name == "unfold_arm":
+            if self.state is ArmSessionState.REST:
+                self._activate(
+                    self._transition_adapter,
+                    transition_name="unfold_arm",
+                    command=command,
+                )
+            return
+        if command.skill_name == "fold_arm" and self.state is ArmSessionState.WORK:
+            self._activate(
+                self._transition_adapter,
+                transition_name="fold_arm",
+                command=command,
+            )
+
+    def finish_command(self, command: Command) -> None:
+        """无论 Gateway 是否进入 Skill，都结束预注册的动作。"""
+
+        with self._lock:
+            adapter = (
+                self._active_adapter
+                if self._prepared_command_id == command.command_id
+                else None
+            )
+        if adapter is not None:
+            self._deactivate(adapter)
 
     def _raise_if_transition_interrupted(self) -> None:
         with self._lock:
@@ -508,6 +591,39 @@ class SO100PlusArmSession:
         with self._lock:
             return self._transition_interrupted
 
+    def _snapshot_gripper_qpos(
+        self,
+        snapshot: SO100PlusPoseSnapshot,
+    ) -> tuple[float, float]:
+        driver_degrees = snapshot.gripper_driver_degrees
+        if driver_degrees is None:
+            raise RuntimeError("当前姿态快照缺少 gripper_joint 实测反馈。")
+        if not math.isfinite(driver_degrees):
+            raise RuntimeError("gripper_joint 实测反馈不是有限数值。")
+        qpos = self._trajectory_validator.gripper_driver_degrees_to_qpos(
+            driver_degrees
+        )
+        return float(driver_degrees), float(qpos)
+
+    @staticmethod
+    def _validate_gripper_held(
+        snapshot: SO100PlusPoseSnapshot,
+        expected_driver_degrees: float,
+    ) -> None:
+        actual = snapshot.gripper_driver_degrees
+        if actual is None or not math.isfinite(actual):
+            raise RuntimeError("转换后无法读取有限的 gripper_joint 反馈。")
+        tolerance = (
+            SO100_PLUS_REAL_HARDWARE_PROFILE
+            .gripper_position_tolerance_degrees
+        )
+        if abs(actual - expected_driver_degrees) > tolerance:
+            raise RuntimeError(
+                f"转换期间夹爪未保持预检姿态：预检 "
+                f"{expected_driver_degrees:.6f}°，实测 {actual:.6f}°，"
+                f"超过 {tolerance:.1f}° 容差。"
+            )
+
     @staticmethod
     def _sequence_has_motion(
         sequence: VerifiedJointMotionSequence,
@@ -528,6 +644,7 @@ class SO100PlusArmSession:
         transition: SO100PlusStorageTransition,
         *,
         direction: StorageTransitionDirection,
+        held_gripper_driver_degrees: float,
     ) -> tuple[JointMotionPlan, JointMotionPlan]:
         if direction is StorageTransitionDirection.UNFOLD:
             first_target = transition.escape_joint_radians
@@ -546,7 +663,20 @@ class SO100PlusArmSession:
             target_joint_radians=second_target,
             limits=self._transition_motion_limits,
         )
-        return first, second
+        return (
+            self._transition_adapter.materialize_joint_plan(
+                first,
+                held_gripper_driver_degrees=(
+                    held_gripper_driver_degrees
+                ),
+            ),
+            self._transition_adapter.materialize_joint_plan(
+                second,
+                held_gripper_driver_degrees=(
+                    held_gripper_driver_degrees
+                ),
+            ),
+        )
 
     def _validate_fold_start(
         self,
@@ -568,7 +698,7 @@ class SO100PlusArmSession:
         rejected = self._require_state(command, ArmSessionState.WORK)
         if rejected is not None:
             return rejected
-        self._activate(self._work_adapter)
+        self._activate(self._work_adapter, command=command)
         try:
             self._work_adapter.move_to(
                 command.params["x"],
@@ -589,9 +719,12 @@ class SO100PlusArmSession:
         if rejected is not None:
             return rejected
         try:
+            self._activate(self._work_adapter, command=command)
             self._work_adapter.open_gripper()
         except Exception as error:
             return self._failure(command, f"open_gripper 执行失败：{error}")
+        finally:
+            self._deactivate(self._work_adapter)
         return self._success(command, "机械臂夹爪已打开")
 
     def close_gripper(self, command: Command) -> ExecutionResult:
@@ -599,9 +732,12 @@ class SO100PlusArmSession:
         if rejected is not None:
             return rejected
         try:
+            self._activate(self._work_adapter, command=command)
             self._work_adapter.close_gripper()
         except Exception as error:
             return self._failure(command, f"close_gripper 执行失败：{error}")
+        finally:
+            self._deactivate(self._work_adapter)
         return self._success(command, "机械臂夹爪已关闭")
 
     def unfold_arm(self, command: Command) -> ExecutionResult:
@@ -614,12 +750,16 @@ class SO100PlusArmSession:
         self._activate(
             self._transition_adapter,
             transition_name="unfold_arm",
+            command=command,
         )
         try:
             current_snapshot = self._pose_reader()
             validate_storage_rest_start(
                 current_snapshot,
                 require_torque_disabled=False,
+            )
+            gripper_degrees, gripper_qpos = self._snapshot_gripper_qpos(
+                current_snapshot
             )
             self._raise_if_transition_interrupted()
             stage = "按当次 follower_rest 规划完整展开轨迹"
@@ -631,6 +771,7 @@ class SO100PlusArmSession:
                 current_snapshot.joint_radians,
                 transition,
                 direction=StorageTransitionDirection.UNFOLD,
+                held_gripper_driver_degrees=gripper_degrees,
             )
             stage = "完整展开轨迹 MuJoCo 碰撞和接触预检查"
             verified = self._trajectory_validator.verify_storage_transition(
@@ -638,6 +779,7 @@ class SO100PlusArmSession:
                 escape_joint_radians=transition.escape_joint_radians,
                 kinematics=self._kinematics,
                 direction=StorageTransitionDirection.UNFOLD,
+                gripper_qpos=gripper_qpos,
             )
             self._raise_if_transition_interrupted()
             self._transition = transition
@@ -650,10 +792,12 @@ class SO100PlusArmSession:
             self._execute_verified_sequence(verified)
             self._raise_if_transition_interrupted()
             stage = "展开完成后的 TCP 和关节门禁"
+            final_snapshot = self._pose_reader()
             validate_work_initial_pose(
-                self._pose_reader(),
+                final_snapshot,
                 self._work_tcp_position_m,
             )
+            self._validate_gripper_held(final_snapshot, gripper_degrees)
             self._finish_transition(
                 ArmSessionState.WORK,
                 "已到达并认证 JoyCon 工作初始姿态。",
@@ -681,10 +825,14 @@ class SO100PlusArmSession:
         self._activate(
             self._transition_adapter,
             transition_name="fold_arm",
+            command=command,
         )
         try:
             current_snapshot = self._pose_reader()
             self._validate_fold_start(current_snapshot)
+            gripper_degrees, gripper_qpos = self._snapshot_gripper_qpos(
+                current_snapshot
+            )
             self._raise_if_transition_interrupted()
             stage = "规划当前位置到 JoyCon 工作初始姿态的完整轨迹"
             return_plan = self._kinematics.plan_position(
@@ -692,11 +840,16 @@ class SO100PlusArmSession:
                 target_position_m=self._work_tcp_position_m,
                 limits=self._transition_motion_limits,
             )
+            return_plan = self._transition_adapter.materialize_joint_plan(
+                return_plan,
+                held_gripper_driver_degrees=gripper_degrees,
+            )
             stage = "返回工作初始姿态轨迹 MuJoCo 碰撞预检查"
             verified_return = (
                 self._trajectory_validator.verify_collision_free_sequence(
                     (return_plan,),
                     self._kinematics,
+                    gripper_qpos=gripper_qpos,
                 )
             )
             self._raise_if_transition_interrupted()
@@ -716,12 +869,14 @@ class SO100PlusArmSession:
                 work_snapshot,
                 self._work_tcp_position_m,
             )
+            self._validate_gripper_held(work_snapshot, gripper_degrees)
             self._raise_if_transition_interrupted()
             stage = "规划 JoyCon 初始姿态到 follower_rest 的完整反向轨迹"
             storage_plans = self._plan_storage_sequence(
                 work_snapshot.joint_radians,
                 self._transition,
                 direction=StorageTransitionDirection.FOLD,
+                held_gripper_driver_degrees=gripper_degrees,
             )
             stage = "完整反向收纳轨迹 MuJoCo 碰撞和接触预检查"
             verified_storage = (
@@ -732,6 +887,7 @@ class SO100PlusArmSession:
                     ),
                     kinematics=self._kinematics,
                     direction=StorageTransitionDirection.FOLD,
+                    gripper_qpos=gripper_qpos,
                 )
             )
             self._raise_if_transition_interrupted()
@@ -748,10 +904,12 @@ class SO100PlusArmSession:
             self._execute_verified_sequence(verified_storage)
             self._raise_if_transition_interrupted()
             stage = "收纳完成后的 follower_rest 门禁"
+            final_snapshot = self._pose_reader()
             validate_storage_rest_start(
-                self._pose_reader(),
+                final_snapshot,
                 require_torque_disabled=False,
             )
+            self._validate_gripper_held(final_snapshot, gripper_degrees)
             self._finish_transition(
                 ArmSessionState.REST,
                 "收纳完成，实际反馈符合 follower_rest 逐关节容差。",

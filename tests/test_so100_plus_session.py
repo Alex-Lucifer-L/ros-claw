@@ -1,3 +1,4 @@
+from dataclasses import replace
 import math
 from threading import Event, Thread
 
@@ -23,6 +24,7 @@ from rosclaw_mini.arm.so100_plus_trajectory_validation import (
     VerifiedJointMotionSequence,
 )
 from rosclaw_mini.command_schema.commands import Command
+from rosclaw_mini.execution.controller import ExecutionController
 
 
 class LinearFakeKinematics:
@@ -108,6 +110,30 @@ class RecordingSessionAdapter:
         self.block_operation = block_operation
         self.operation_started = Event()
         self.release_operation = Event()
+        self.action_active = False
+        self.materialized_plans = []
+
+    def begin_motion_action(self) -> None:
+        if self.action_active:
+            raise RuntimeError("测试动作重复注册")
+        self.action_active = True
+
+    def end_motion_action(self) -> None:
+        self.action_active = False
+
+    def materialize_joint_plan(
+        self,
+        plan,
+        *,
+        held_gripper_driver_degrees=None,
+    ):
+        finalized = replace(
+            plan,
+            is_final_execution_plan=True,
+            held_gripper_driver_degrees=held_gripper_driver_degrees,
+        )
+        self.materialized_plans.append(finalized)
+        return finalized
 
     def _record(self, name: str, *values) -> None:
         call = (name, *values)
@@ -153,7 +179,13 @@ class RecordingTrajectoryValidator:
         self.return_calls = []
 
     @staticmethod
-    def _verified(plans):
+    def gripper_driver_degrees_to_qpos(driver_degrees):
+        if driver_degrees is None or not math.isfinite(driver_degrees):
+            raise SO100PlusTrajectoryValidationError("模拟夹爪映射失败")
+        return math.radians(driver_degrees)
+
+    @staticmethod
+    def _verified(plans, gripper_qpos):
         plans = tuple(plans)
         samples = (plans[0].current_joint_radians,) + tuple(
             waypoint
@@ -171,6 +203,7 @@ class RecordingTrajectoryValidator:
                 final_contact_pairs=frozenset(),
                 last_contact_sample=-1,
             ),
+            gripper_qpos=gripper_qpos,
         )
 
     def verify_storage_transition(
@@ -180,23 +213,30 @@ class RecordingTrajectoryValidator:
         escape_joint_radians,
         kinematics,
         direction,
+        gripper_qpos,
     ):
         del escape_joint_radians, kinematics
         plans = tuple(plans)
-        self.storage_calls.append((plans, direction))
+        self.storage_calls.append((plans, direction, gripper_qpos))
         self.event_log.append(("validate_storage", plans, direction))
         if self.storage_error is not None:
             raise self.storage_error
-        return self._verified(plans)
+        return self._verified(plans, gripper_qpos)
 
-    def verify_collision_free_sequence(self, plans, kinematics):
+    def verify_collision_free_sequence(
+        self,
+        plans,
+        kinematics,
+        *,
+        gripper_qpos,
+    ):
         del kinematics
         plans = tuple(plans)
-        self.return_calls.append(plans)
+        self.return_calls.append((plans, gripper_qpos))
         self.event_log.append(("validate_return", plans))
         if self.return_error is not None:
             raise self.return_error
-        return self._verified(plans)
+        return self._verified(plans, gripper_qpos)
 
 
 class PoseQueue:
@@ -216,6 +256,7 @@ def _rest_snapshot(kinematics) -> SO100PlusPoseSnapshot:
         ),
         joint_radians=kinematics.storage,
         tcp_position_m=kinematics.forward_position(kinematics.storage),
+        gripper_driver_degrees=-9.0,
         torque_enabled=(1,) * 7,
     )
 
@@ -227,6 +268,7 @@ def _work_snapshot(kinematics) -> SO100PlusPoseSnapshot:
         ),
         joint_radians=kinematics.work,
         tcp_position_m=kinematics.forward_position(kinematics.work),
+        gripper_driver_degrees=-9.0,
         torque_enabled=(1,) * 7,
     )
 
@@ -242,6 +284,7 @@ def _unknown_snapshot(kinematics) -> SO100PlusPoseSnapshot:
         driver_degrees=tuple(driver),
         joint_radians=tuple(joints),
         tcp_position_m=kinematics.forward_position(joints),
+        gripper_driver_degrees=-9.0,
         torque_enabled=(1,) * 7,
     )
 
@@ -255,6 +298,7 @@ def _formal_work_snapshot(kinematics) -> SO100PlusPoseSnapshot:
         ),
         joint_radians=tuple(joints),
         tcp_position_m=(0.35, 0.0, 0.22),
+        gripper_driver_degrees=-9.0,
         torque_enabled=(1,) * 7,
     )
 
@@ -408,7 +452,9 @@ def test_unfold_validates_complete_plans_before_executing_same_objects():
         "execute_joint_plan",
         "execute_joint_plan",
     ]
-    assert validated == planned
+    assert len(planned) == len(validated)
+    assert validated == tuple(transition.materialized_plans)
+    assert all(plan.is_final_execution_plan for plan in validated)
     assert executed == validated
     assert all(
         executed_plan is validated_plan
@@ -418,6 +464,113 @@ def test_unfold_validates_complete_plans_before_executing_same_objects():
             strict=True,
         )
     )
+
+
+@pytest.mark.parametrize("gripper_degrees", (-9.0, 30.0, 60.0))
+def test_unfold_precheck_uses_actual_gripper_and_execution_holds_it(
+    gripper_degrees,
+):
+    kinematics = LinearFakeKinematics()
+    transition = RecordingSessionAdapter()
+    validator = RecordingTrajectoryValidator()
+
+    def rest_with_gripper(_kinematics):
+        return replace(
+            _rest_snapshot(_kinematics),
+            gripper_driver_degrees=gripper_degrees,
+        )
+
+    session, _kinematics, _work, _transition = _session(
+        rest_with_gripper,
+        rest_with_gripper(kinematics),
+        replace(
+            _work_snapshot(kinematics),
+            gripper_driver_degrees=gripper_degrees,
+        ),
+        transition_adapter=transition,
+        trajectory_validator=validator,
+    )
+
+    result = session.unfold_arm(_command("unfold_arm"))
+
+    assert result.success is True
+    assert validator.storage_calls[0][2] == pytest.approx(
+        math.radians(gripper_degrees)
+    )
+    assert all(
+        plan.held_gripper_driver_degrees == gripper_degrees
+        for plan in transition.materialized_plans
+    )
+    assert all(
+        call[1].held_gripper_driver_degrees == gripper_degrees
+        for call in transition.calls
+        if call[0] == "execute_joint_plan"
+    )
+
+
+@pytest.mark.parametrize("invalid_gripper", (None, float("nan")))
+def test_unfold_invalid_gripper_feedback_fails_before_any_motion(
+    invalid_gripper,
+):
+    kinematics = LinearFakeKinematics()
+    transition = RecordingSessionAdapter()
+    invalid_snapshot = replace(
+        _rest_snapshot(kinematics),
+        gripper_driver_degrees=invalid_gripper,
+    )
+    session, _kinematics, _work, _transition = _session(
+        _rest_snapshot,
+        invalid_snapshot,
+        transition_adapter=transition,
+    )
+
+    result = session.unfold_arm(_command("unfold_arm"))
+
+    assert result.success is False
+    assert "展开前 follower_rest 复核" in result.message
+    assert "gripper_joint" in result.message
+    assert session.state is ArmSessionState.REST
+    assert transition.calls == []
+    assert transition.materialized_plans == []
+
+
+def test_stop_after_controller_submit_before_skill_entry_is_not_lost():
+    kinematics = LinearFakeKinematics()
+    transition = RecordingSessionAdapter()
+    session, _kinematics, _work, _transition = _session(
+        _rest_snapshot,
+        _rest_snapshot(kinematics),
+        transition_adapter=transition,
+    )
+    worker_reached_runner = Event()
+    allow_skill_entry = Event()
+
+    def runner(command):
+        if command.skill_name == "stop":
+            return session.stop(command)
+        worker_reached_runner.set()
+        assert allow_skill_entry.wait(timeout=1.0)
+        return session.unfold_arm(command)
+
+    controller = ExecutionController(
+        runner,
+        before_submit=session.prepare_command,
+        after_finish=session.finish_command,
+    )
+    assert controller.submit(_command("unfold_arm")) is True
+    assert worker_reached_runner.wait(timeout=1.0)
+
+    stop_result = controller.request_stop(_command("stop"))
+    allow_skill_entry.set()
+    result = controller.wait(timeout=1.0)
+
+    assert stop_result.success is True
+    assert result is not None
+    assert result.success is False
+    assert "首条运动指令前已被 stop 中断" in result.message
+    assert session.state is ArmSessionState.UNVERIFIED
+    assert transition.calls == [("stop",)]
+    assert transition.action_active is False
 
 
 def test_unfold_collision_precheck_fails_before_motion_and_keeps_rest():
@@ -568,7 +721,7 @@ def test_fold_plans_validates_and_executes_same_return_and_storage_plans():
         for event in event_log
         if event[0] == "execute_joint_plan"
     )
-    validated_return = validator.return_calls[0]
+    validated_return = validator.return_calls[0][0]
     validated_storage = validator.storage_calls[0][0]
     assert executed == validated_return + validated_storage
     assert all(
@@ -580,6 +733,39 @@ def test_fold_plans_validates_and_executes_same_return_and_storage_plans():
         )
     )
     assert all(call[0] != "move_to" for call in transition.calls)
+
+
+def test_fold_return_and_storage_prechecks_share_actual_held_gripper():
+    kinematics = LinearFakeKinematics()
+    gripper_degrees = 35.0
+    transition = RecordingSessionAdapter()
+    validator = RecordingTrajectoryValidator()
+
+    def with_gripper(snapshot):
+        return replace(
+            snapshot,
+            gripper_driver_degrees=gripper_degrees,
+        )
+
+    session, _kinematics, _work, _transition = _session(
+        lambda inner: with_gripper(_work_snapshot(inner)),
+        with_gripper(_formal_work_snapshot(kinematics)),
+        with_gripper(_work_snapshot(kinematics)),
+        with_gripper(_rest_snapshot(kinematics)),
+        transition_adapter=transition,
+        trajectory_validator=validator,
+    )
+
+    result = session.fold_arm(_command("fold_arm"))
+
+    expected_qpos = math.radians(gripper_degrees)
+    assert result.success is True
+    assert validator.return_calls[0][1] == pytest.approx(expected_qpos)
+    assert validator.storage_calls[0][2] == pytest.approx(expected_qpos)
+    assert all(
+        plan.held_gripper_driver_degrees == gripper_degrees
+        for plan in transition.materialized_plans
+    )
 
 
 def test_fold_return_collision_precheck_does_not_move_and_keeps_work():

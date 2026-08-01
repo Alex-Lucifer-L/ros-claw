@@ -310,11 +310,21 @@ def _validate_so100_plus_workspace_certification(
 
 def _build_controller(
     skills: dict[str, SkillDefinition],
+    *,
+    session: SO100PlusArmSession | None = None,
 ) -> ExecutionController:
     def execute_command(command):
         return run_command(command, skills)
 
-    return ExecutionController(execute_command)
+    return ExecutionController(
+        execute_command,
+        before_submit=(
+            session.prepare_command if session is not None else None
+        ),
+        after_finish=(
+            session.finish_command if session is not None else None
+        ),
+    )
 
 
 def build_mock_runtime(
@@ -489,7 +499,7 @@ def build_so100_plus_runtime(
         return ArmRuntime(
             adapter=work_adapter,
             skills=skills,
-            controller=_build_controller(skills),
+            controller=_build_controller(skills, session=session),
             current_tcp_position_m=initial_snapshot.tcp_position_m,
             move_arm_disabled_reason=move_arm_disabled_reason,
             session=session,

@@ -8,7 +8,11 @@ from rosclaw_mini.arm.so100_plus_trajectory_validation import (
     SO100PlusTrajectoryValidationError,
     SO100PlusTrajectoryValidationUnavailableError,
     StorageTransitionDirection,
+    so100_plus_gripper_driver_degrees_to_mujoco_qpos,
 )
+
+
+TEST_GRIPPER_QPOS = math.radians(-9.0)
 
 
 class LinearTrajectoryKinematics:
@@ -29,13 +33,21 @@ def _plan(
     target: float,
     *waypoint_heights: float,
 ) -> JointMotionPlan:
+    controls = (start, *waypoint_heights)
+    dense_heights = []
+    for begin, end in zip(controls, controls[1:]):
+        steps = max(1, math.ceil(abs(end - begin) / math.radians(1.0)))
+        dense_heights.extend(
+            begin + (end - begin) * index / steps
+            for index in range(1, steps + 1)
+        )
     return JointMotionPlan(
         target_position_m=(0.3, 0.0, target),
         current_joint_radians=_joints(start),
         target_joint_radians=_joints(target),
-        waypoints_radians=tuple(
-            _joints(height) for height in waypoint_heights
-        ),
+        waypoints_radians=tuple(_joints(height) for height in dense_heights),
+        is_final_execution_plan=True,
+        held_gripper_driver_degrees=-9.0,
     )
 
 
@@ -49,8 +61,10 @@ def _unfold_plans() -> tuple[JointMotionPlan, JointMotionPlan]:
 def _validator_with_contacts(contact_factory):
     # 绕过构造函数只为单元测试注入内存接触结果；不会加载 MuJoCo 模型。
     validator = object.__new__(SO100PlusMuJoCoTrajectoryValidator)
+    validator._gripper_qpos_range = (-0.2, 2.0)
 
-    def sample_contacts(samples):
+    def sample_contacts(samples, gripper_qpos):
+        assert gripper_qpos == TEST_GRIPPER_QPOS
         return tuple(
             frozenset(contact_factory(index, joints, len(samples)))
             for index, joints in enumerate(samples)
@@ -77,6 +91,7 @@ def test_unfold_checks_dense_complete_path_and_returns_same_plans():
         escape_joint_radians=_joints(0.2),
         kinematics=LinearTrajectoryKinematics(),
         direction=StorageTransitionDirection.UNFOLD,
+        gripper_qpos=TEST_GRIPPER_QPOS,
     )
 
     assert verified.plans[0] is plans[0]
@@ -114,6 +129,7 @@ def test_unfold_rejects_new_collision_before_storage_escape():
             escape_joint_radians=_joints(0.2),
             kinematics=LinearTrajectoryKinematics(),
             direction=StorageTransitionDirection.UNFOLD,
+            gripper_qpos=TEST_GRIPPER_QPOS,
         )
 
 
@@ -134,6 +150,7 @@ def test_unfold_rejects_storage_escape_that_still_has_contact():
             escape_joint_radians=_joints(0.2),
             kinematics=LinearTrajectoryKinematics(),
             direction=StorageTransitionDirection.UNFOLD,
+            gripper_qpos=TEST_GRIPPER_QPOS,
         )
 
 
@@ -156,6 +173,7 @@ def test_unfold_rejects_work_initial_pose_that_still_has_contact():
             escape_joint_radians=_joints(0.2),
             kinematics=LinearTrajectoryKinematics(),
             direction=StorageTransitionDirection.UNFOLD,
+            gripper_qpos=TEST_GRIPPER_QPOS,
         )
 
 
@@ -178,9 +196,10 @@ def test_return_to_work_initial_checks_every_dense_sample_for_collision():
         validator.verify_collision_free_sequence(
             (plan,),
             LinearTrajectoryKinematics(),
+            gripper_qpos=TEST_GRIPPER_QPOS,
         )
 
-    assert len(visited) > len(plan.waypoints_radians) + 1
+    assert len(visited) == len(plan.waypoints_radians) + 1
 
 
 def test_fold_allows_only_final_storage_contacts_after_escape():
@@ -201,6 +220,7 @@ def test_fold_allows_only_final_storage_contacts_after_escape():
         escape_joint_radians=_joints(0.2),
         kinematics=LinearTrajectoryKinematics(),
         direction=StorageTransitionDirection.FOLD,
+        gripper_qpos=TEST_GRIPPER_QPOS,
     )
 
     assert verified.plans == plans
@@ -217,3 +237,36 @@ def test_missing_mujoco_model_fails_closed(tmp_path):
         match="模型不可用",
     ):
         SO100PlusMuJoCoTrajectoryValidator(model_path=missing_model)
+
+
+@pytest.mark.parametrize(
+    ("driver_degrees", "expected_qpos"),
+    [(-9.0, math.radians(-9.0)), (60.0, math.radians(60.0))],
+)
+def test_gripper_driver_degrees_map_directly_to_mujoco_radians(
+    driver_degrees,
+    expected_qpos,
+):
+    assert so100_plus_gripper_driver_degrees_to_mujoco_qpos(
+        driver_degrees
+    ) == pytest.approx(expected_qpos)
+
+
+@pytest.mark.parametrize("invalid", [None, float("nan"), float("inf"), True])
+def test_invalid_gripper_feedback_fails_mapping(invalid):
+    with pytest.raises(
+        SO100PlusTrajectoryValidationError,
+        match="夹爪反馈",
+    ):
+        so100_plus_gripper_driver_degrees_to_mujoco_qpos(invalid)
+
+
+def test_gripper_feedback_outside_loaded_model_range_fails_closed():
+    validator = object.__new__(SO100PlusMuJoCoTrajectoryValidator)
+    validator._gripper_qpos_range = (-0.2, 2.0)
+
+    with pytest.raises(
+        SO100PlusTrajectoryValidationError,
+        match="超出 MuJoCo gripper_joint 范围",
+    ):
+        validator.gripper_driver_degrees_to_qpos(120.0)

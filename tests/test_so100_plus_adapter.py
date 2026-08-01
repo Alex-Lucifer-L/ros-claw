@@ -1,4 +1,5 @@
 import math
+from threading import Event, Thread
 
 import pytest
 
@@ -16,6 +17,9 @@ from rosclaw_mini.arm.so100_plus import (
     SO100PlusTorqueReleaseSafetyError,
 )
 from rosclaw_mini.arm.kinematics import JointMotionPlan
+from rosclaw_mini.arm.so100_plus_trajectory_validation import (
+    SO100PlusMuJoCoTrajectoryValidator,
+)
 from rosclaw_mini.safety.limits import (
     AxisLimits,
     JointLimits,
@@ -1051,7 +1055,11 @@ def test_move_to_executes_planned_waypoint_and_preserves_gripper():
             None,
         )
     ]
-    assert adapter.last_motion_plan is kinematics.plan
+    assert adapter.last_motion_plan is not kinematics.plan
+    assert adapter.last_motion_plan.is_final_execution_plan is True
+    assert adapter.last_motion_plan.target_joint_radians == (
+        kinematics.plan.target_joint_radians
+    )
     assert waits == pytest.approx([1 / 30, 1 / 30, 0.25, 0.25, 0.25])
     assert adapter.last_settle_report is not None
     assert adapter.last_settle_report.duration_seconds == pytest.approx(0.75)
@@ -1098,7 +1106,7 @@ def test_execute_joint_plan_uses_prechecked_plan_without_replanning():
         motion_config=SO100PlusMotionConfig(),
     )
     adapter.connect()
-    prechecked_plan = kinematics.plan
+    prechecked_plan = adapter.materialize_joint_plan(kinematics.plan)
 
     adapter.execute_joint_plan(prechecked_plan)
 
@@ -1109,6 +1117,163 @@ def test_execute_joint_plan_uses_prechecked_plan_without_replanning():
         "Goal_Position",
         [11.0, 21.0, 31.0, 41.0, 51.0, 61.0, -5.0],
         None,
+    )
+
+
+def test_streaming_motor_targets_exactly_match_final_prechecked_waypoints():
+    robot = FakeRobot()
+    kinematics = FakeMotionKinematics()
+    adapter = make_adapter(
+        robot,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(stream_frequency_hz=30.0),
+    )
+    adapter.connect()
+    final_plan = adapter.materialize_joint_plan(
+        kinematics.plan,
+        held_gripper_driver_degrees=-5.0,
+    )
+    validator = object.__new__(SO100PlusMuJoCoTrajectoryValidator)
+    validator._gripper_qpos_range = (-0.2, 2.0)
+    validator._sample_contacts = lambda samples, gripper_qpos: tuple(
+        frozenset() for _ in samples
+    )
+    verified = validator.verify_collision_free_sequence(
+        (final_plan,),
+        kinematics,
+        gripper_qpos=math.radians(-5.0),
+    )
+    assert verified.sampled_joint_radians[1:] == (
+        final_plan.waypoints_radians
+    )
+
+    def execution_must_not_materialize_again(*_args, **_kwargs):
+        raise AssertionError("执行阶段不得再规划或插值")
+
+    adapter.materialize_joint_plan = execution_must_not_materialize_again
+    adapter.execute_joint_plan(verified.plans[0])
+
+    writes = goal_write_calls(robot)
+    assert len(writes) == len(verified.plans[0].waypoints_radians)
+    assert kinematics.plan_calls == []
+    assert kinematics.plan_joint_calls == []
+    for write, validated_waypoint in zip(
+        writes,
+        verified.plans[0].waypoints_radians,
+        strict=True,
+    ):
+        register, driver_targets, motor_name = write
+        assert register == "Goal_Position"
+        assert motor_name is None
+        assert tuple(value / 100.0 for value in driver_targets[:6]) == (
+            pytest.approx(validated_waypoint)
+        )
+        assert driver_targets[-1] == -5.0
+
+
+def test_stop_between_registration_and_first_motor_write_is_not_lost():
+    robot = FakeRobot()
+    adapter = make_adapter(
+        robot,
+        kinematics=FakeMotionKinematics(),
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(stream_frequency_hz=30.0),
+    )
+    adapter.connect()
+    final_plan = adapter.materialize_joint_plan(
+        adapter.kinematics.plan,
+        held_gripper_driver_degrees=-5.0,
+    )
+    reached_last_prewrite_boundary = Event()
+    allow_first_write = Event()
+    original_write = adapter._write_motion_target
+
+    def gated_write(*args, **kwargs):
+        reached_last_prewrite_boundary.set()
+        assert allow_first_write.wait(timeout=1.0)
+        return original_write(*args, **kwargs)
+
+    adapter._write_motion_target = gated_write
+    adapter.begin_motion_action()
+    errors = []
+    worker = Thread(
+        target=lambda: (
+            errors.append(_capture_exception(adapter.execute_joint_plan, final_plan))
+        )
+    )
+    worker.start()
+    assert reached_last_prewrite_boundary.wait(timeout=1.0)
+
+    adapter.stop()
+    allow_first_write.set()
+    worker.join(timeout=1.0)
+    adapter.end_motion_action()
+
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert isinstance(errors[0], SO100PlusMotionStoppedError)
+    assert goal_write_calls(robot) == []
+
+
+def _capture_exception(callable_, *args):
+    try:
+        callable_(*args)
+    except Exception as error:
+        return error
+    raise AssertionError("预期调用抛出异常")
+
+
+def test_stop_after_first_final_waypoint_prevents_all_later_waypoints():
+    robot = FakeRobot()
+    adapter = None
+    wait_calls = 0
+
+    def stop_after_first_write(_seconds):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            adapter.stop()
+            return True
+        return False
+
+    kinematics = FakeMotionKinematics()
+    target = tuple(
+        value + math.radians(3.0)
+        for value in kinematics.current_model_radians
+    )
+    raw_plan = JointMotionPlan(
+        target_position_m=kinematics.plan.target_position_m,
+        current_joint_radians=kinematics.current_model_radians,
+        target_joint_radians=target,
+        waypoints_radians=(target,),
+    )
+    adapter = make_adapter(
+        robot,
+        wait_func=stop_after_first_write,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(stream_frequency_hz=30.0),
+    )
+    adapter.connect()
+    final_plan = adapter.materialize_joint_plan(
+        raw_plan,
+        held_gripper_driver_degrees=-5.0,
+    )
+    assert len(final_plan.waypoints_radians) > 1
+
+    with pytest.raises(SO100PlusMotionStoppedError, match=r"stop\(\) 取消"):
+        adapter.execute_joint_plan(final_plan)
+
+    writes = goal_write_calls(robot)
+    # 第一个最终 waypoint，加 stop() 的当前位置保持。
+    assert len(writes) == 2
+    first_written = tuple(value / 100.0 for value in writes[0][1][:6])
+    assert first_written == pytest.approx(final_plan.waypoints_radians[0])
+    assert all(
+        tuple(value / 100.0 for value in write[1][:6])
+        != pytest.approx(final_plan.waypoints_radians[-1])
+        for write in writes
     )
 
 

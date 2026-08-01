@@ -15,6 +15,7 @@ from typing import Any
 
 from rosclaw_mini.arm.kinematics import (
     JointMotionPlan,
+    SO100_PLUS_COLLISION_EXECUTION_STEP_RADIANS,
     SO100PlusKinematics,
 )
 from rosclaw_mini.safety.limits import SO100_PLUS_ARM_JOINT_NAMES
@@ -29,8 +30,10 @@ DEFAULT_SO100_PLUS_MUJOCO_MODEL_PATH = (
     / "controllers"
     / "scene_plus.xml"
 )
-SO100_PLUS_COLLISION_SAMPLE_STEP_RADIANS = math.radians(1.0)
-SO100_PLUS_MUJOCO_GRIPPER_QPOS = -0.157
+SO100_PLUS_COLLISION_SAMPLE_STEP_RADIANS = (
+    SO100_PLUS_COLLISION_EXECUTION_STEP_RADIANS
+)
+SO100_PLUS_MUJOCO_GRIPPER_JOINT_NAME = "gripper_joint"
 
 
 class SO100PlusTrajectoryValidationError(RuntimeError):
@@ -69,6 +72,28 @@ class VerifiedJointMotionSequence:
     plans: tuple[JointMotionPlan, ...]
     sampled_joint_radians: tuple[tuple[float, ...], ...]
     report: SO100PlusTrajectoryValidationReport
+    gripper_qpos: float
+
+
+def so100_plus_gripper_driver_degrees_to_mujoco_qpos(
+    driver_degrees: float,
+) -> float:
+    """将已校准驱动反馈映射到 MuJoCo 夹爪 qpos。
+
+    Feetech 总线的 ``Present_Position`` 已经校准为度；
+    ``JoyConController_plus`` 仅翻转 0/1/3 号手臂关节，不翻转
+    ``gripper_joint``，而 MuJoCo XML 声明角度单位为 radian。
+    """
+
+    if (
+        isinstance(driver_degrees, bool)
+        or not isinstance(driver_degrees, (int, float))
+        or not math.isfinite(float(driver_degrees))
+    ):
+        raise SO100PlusTrajectoryValidationError(
+            "夹爪反馈必须是有限的已校准驱动角。"
+        )
+    return math.radians(float(driver_degrees))
 
 
 def _finite_joints(
@@ -114,6 +139,10 @@ def _plans_to_route(
     route: list[tuple[float, ...]] = []
     previous_target: tuple[float, ...] | None = None
     for index, plan in enumerate(plans_tuple):
+        if not plan.is_final_execution_plan:
+            raise SO100PlusTrajectoryValidationError(
+                f"第 {index + 1} 段尚未固化为最终执行计划。"
+            )
         current = _finite_joints(
             plan.current_joint_radians,
             label=f"第 {index + 1} 段起点",
@@ -153,38 +182,6 @@ def _plans_to_route(
     return tuple(route)
 
 
-def _densify_route(
-    route: Sequence[Sequence[float]],
-) -> tuple[tuple[float, ...], ...]:
-    dense: list[tuple[float, ...]] = []
-    for start_values, target_values in zip(route, route[1:]):
-        start = _finite_joints(start_values, label="轨迹采样起点")
-        target = _finite_joints(target_values, label="轨迹采样终点")
-        if not dense:
-            dense.append(start)
-        delta = tuple(
-            end - begin
-            for begin, end in zip(start, target, strict=True)
-        )
-        step_count = max(
-            1,
-            math.ceil(
-                max(abs(value) for value in delta)
-                / SO100_PLUS_COLLISION_SAMPLE_STEP_RADIANS
-            ),
-        )
-        dense.extend(
-            tuple(
-                begin + change * (step_index / step_count)
-                for begin, change in zip(start, delta, strict=True)
-            )
-            for step_index in range(1, step_count + 1)
-        )
-    if not dense:
-        dense.append(_finite_joints(route[0], label="单点轨迹"))
-    return tuple(dense)
-
-
 class SO100PlusMuJoCoTrajectoryValidator:
     """使用已登记 MuJoCo 模型检查完整关节轨迹。"""
 
@@ -211,6 +208,67 @@ class SO100PlusMuJoCoTrajectoryValidator:
                 f"无法加载 SO-100 Plus MuJoCo 模型：{self.model_path}。"
             ) from error
         self._mujoco = mujoco
+        joint_id = mujoco.mj_name2id(
+            self._model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            SO100_PLUS_MUJOCO_GRIPPER_JOINT_NAME,
+        )
+        if joint_id < 0:
+            raise SO100PlusTrajectoryValidationUnavailableError(
+                "MuJoCo 模型缺少 gripper_joint，无法表达实际夹爪姿态。"
+            )
+        if int(self._model.jnt_type[joint_id]) != int(
+            mujoco.mjtJoint.mjJNT_HINGE
+        ):
+            raise SO100PlusTrajectoryValidationUnavailableError(
+                "MuJoCo gripper_joint 不是单自由度转动关节。"
+            )
+        if not bool(self._model.jnt_limited[joint_id]):
+            raise SO100PlusTrajectoryValidationUnavailableError(
+                "MuJoCo gripper_joint 没有可认证的角度范围。"
+            )
+        self._gripper_qpos_address = int(
+            self._model.jnt_qposadr[joint_id]
+        )
+        self._gripper_qpos_range = tuple(
+            float(value) for value in self._model.jnt_range[joint_id]
+        )
+
+    def gripper_driver_degrees_to_qpos(
+        self,
+        driver_degrees: float,
+    ) -> float:
+        """映射实测夹爪角，并按当前已加载模型范围失败关闭。"""
+
+        qpos = so100_plus_gripper_driver_degrees_to_mujoco_qpos(
+            driver_degrees
+        )
+        lower, upper = self._gripper_qpos_range
+        if not lower <= qpos <= upper:
+            raise SO100PlusTrajectoryValidationError(
+                f"夹爪实测角 {float(driver_degrees):.6f}° 映射为 "
+                f"qpos={qpos:.6f} rad，超出 MuJoCo gripper_joint "
+                f"范围 [{lower:.6f}, {upper:.6f}]。"
+            )
+        return qpos
+
+    def _validate_gripper_qpos(self, gripper_qpos: float) -> float:
+        if (
+            isinstance(gripper_qpos, bool)
+            or not isinstance(gripper_qpos, (int, float))
+            or not math.isfinite(float(gripper_qpos))
+        ):
+            raise SO100PlusTrajectoryValidationError(
+                "MuJoCo 夹爪 qpos 必须是有限数值。"
+            )
+        value = float(gripper_qpos)
+        lower, upper = self._gripper_qpos_range
+        if not lower <= value <= upper:
+            raise SO100PlusTrajectoryValidationError(
+                f"MuJoCo 夹爪 qpos={value:.6f} 超出模型范围 "
+                f"[{lower:.6f}, {upper:.6f}]。"
+            )
+        return value
 
     def _contact_pairs(
         self,
@@ -246,13 +304,13 @@ class SO100PlusMuJoCoTrajectoryValidator:
     def _sample_contacts(
         self,
         sampled_joint_radians: Sequence[Sequence[float]],
+        gripper_qpos: float,
     ) -> tuple[frozenset[tuple[str, str]], ...]:
         data = self._mujoco.MjData(self._model)
         contacts = []
         for joints in sampled_joint_radians:
             data.qpos[:6] = joints
-            if data.qpos.size > 6:
-                data.qpos[6] = SO100_PLUS_MUJOCO_GRIPPER_QPOS
+            data.qpos[self._gripper_qpos_address] = gripper_qpos
             self._mujoco.mj_forward(self._model, data)
             contacts.append(self._contact_pairs(data))
         return tuple(contacts)
@@ -282,11 +340,22 @@ class SO100PlusMuJoCoTrajectoryValidator:
         self,
         plans: Sequence[JointMotionPlan],
         kinematics: SO100PlusKinematics,
+        *,
+        gripper_qpos: float,
     ) -> VerifiedJointMotionSequence:
         """验证普通工作位置返回工作初始姿态的完整计划。"""
 
         plans_tuple = tuple(plans)
-        samples = _densify_route(_plans_to_route(plans_tuple))
+        samples = _plans_to_route(plans_tuple)
+        gripper_qpos = self._validate_gripper_qpos(gripper_qpos)
+        max_step = self._max_sample_step_degrees(samples)
+        if max_step > math.degrees(
+            SO100_PLUS_COLLISION_SAMPLE_STEP_RADIANS
+        ) + 1e-9:
+            raise SO100PlusTrajectoryValidationError(
+                f"最终执行计划的相邻关节点距离 {max_step:.6f}° "
+                "超过 MuJoCo 逐点预检上限 1.0°。"
+            )
         positions = tuple(
             tuple(kinematics.forward_position(joints))
             for joints in samples
@@ -298,7 +367,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
                 f"{minimum_tcp_z:.6f} m，低于支撑平面。"
             )
 
-        contacts = self._sample_contacts(samples)
+        contacts = self._sample_contacts(samples, gripper_qpos)
         for index, pairs in enumerate(contacts):
             if pairs:
                 raise SO100PlusTrajectoryValidationError(
@@ -309,6 +378,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
         return VerifiedJointMotionSequence(
             plans=plans_tuple,
             sampled_joint_radians=samples,
+            gripper_qpos=gripper_qpos,
             report=SO100PlusTrajectoryValidationReport(
                 sample_count=len(samples),
                 max_joint_sample_step_degrees=(
@@ -335,6 +405,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
         escape_joint_radians: Sequence[float],
         kinematics: SO100PlusKinematics,
         direction: StorageTransitionDirection,
+        gripper_qpos: float,
     ) -> VerifiedJointMotionSequence:
         """验证包含固定 storage_escape 的完整展开或反向收纳计划。"""
 
@@ -354,7 +425,16 @@ class SO100PlusMuJoCoTrajectoryValidator:
                 "执行计划必须且只能经过一次固定 storage_escape。"
             )
 
-        samples = _densify_route(route)
+        samples = route
+        gripper_qpos = self._validate_gripper_qpos(gripper_qpos)
+        max_step = self._max_sample_step_degrees(samples)
+        if max_step > math.degrees(
+            SO100_PLUS_COLLISION_SAMPLE_STEP_RADIANS
+        ) + 1e-9:
+            raise SO100PlusTrajectoryValidationError(
+                f"最终执行计划的相邻关节点距离 {max_step:.6f}° "
+                "超过 MuJoCo 逐点预检上限 1.0°。"
+            )
         sample_escape_indices = tuple(
             index
             for index, joints in enumerate(samples)
@@ -369,7 +449,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
             tuple(kinematics.forward_position(joints))
             for joints in samples
         )
-        contacts = self._sample_contacts(samples)
+        contacts = self._sample_contacts(samples, gripper_qpos)
         minimum_tcp_z = min(position[2] for position in positions)
 
         if contacts[escape_index]:
@@ -441,6 +521,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
         return VerifiedJointMotionSequence(
             plans=plans_tuple,
             sampled_joint_radians=samples,
+            gripper_qpos=gripper_qpos,
             report=SO100PlusTrajectoryValidationReport(
                 sample_count=len(samples),
                 max_joint_sample_step_degrees=(

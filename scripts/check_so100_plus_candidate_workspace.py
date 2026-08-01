@@ -86,6 +86,10 @@ MODEL_PATH = (
     / "controllers"
     / "scene_plus.xml"
 )
+# 仅供不读硬件的历史验收报告重现使用；真实转换会话
+# 必须传入当次 Present_Position 中的 gripper_joint，不能把它
+# 当成真机当前姿态。
+CERTIFIED_OFFLINE_GRIPPER_REFERENCE_DRIVER_DEGREES = math.degrees(-0.157)
 # 2026-07-18 对 right_follower 的只读实测。它描述这台机械臂的
 # README follower_rest 收纳姿态，不是通用 SO-100 Plus 出厂常量。
 EXPECTED_STORAGE_REST_DRIVER_DEGREES = (
@@ -512,6 +516,10 @@ def _linear_joint_plan(
     start_joint_radians: Sequence[float],
     target_joint_radians: Sequence[float],
     kinematics: SO100PlusKinematics,
+    *,
+    gripper_driver_degrees: float = (
+        CERTIFIED_OFFLINE_GRIPPER_REFERENCE_DRIVER_DEGREES
+    ),
 ) -> JointMotionPlan:
     """构造验收脚本原有的 1° 直线关节计划。"""
 
@@ -548,6 +556,8 @@ def _linear_joint_plan(
         current_joint_radians=start,
         target_joint_radians=target,
         waypoints_radians=waypoints,
+        is_final_execution_plan=True,
+        held_gripper_driver_degrees=float(gripper_driver_degrees),
     )
 
 
@@ -556,6 +566,9 @@ def validate_storage_to_initial_transition(
     kinematics: SO100PlusKinematics,
     *,
     model_path: Path = MODEL_PATH,
+    gripper_driver_degrees: float = (
+        CERTIFIED_OFFLINE_GRIPPER_REFERENCE_DRIVER_DEGREES
+    ),
 ) -> TransitionValidation:
     """确认收纳姿态只脱离已有贴靠、TCP 单调上升且最终无接触。"""
 
@@ -568,22 +581,28 @@ def validate_storage_to_initial_transition(
             shared_transition.storage_joint_radians,
             shared_transition.escape_joint_radians,
             kinematics,
+            gripper_driver_degrees=gripper_driver_degrees,
         ),
         _linear_joint_plan(
             shared_transition.escape_joint_radians,
             shared_transition.work_joint_radians,
             kinematics,
+            gripper_driver_degrees=gripper_driver_degrees,
         ),
     )
-    verified = SO100PlusMuJoCoTrajectoryValidator(
+    validator = SO100PlusMuJoCoTrajectoryValidator(
         model_path=model_path
-    ).verify_storage_transition(
+    )
+    verified = validator.verify_storage_transition(
         plans,
         escape_joint_radians=(
             shared_transition.escape_joint_radians
         ),
         kinematics=kinematics,
         direction=StorageTransitionDirection.UNFOLD,
+        gripper_qpos=validator.gripper_driver_degrees_to_qpos(
+            gripper_driver_degrees
+        ),
     )
     path = np.asarray(verified.sampled_joint_radians, dtype=float)
     positions = np.asarray(
@@ -632,6 +651,9 @@ def validate_collision_free_joint_path(
     kinematics: SO100PlusKinematics,
     *,
     model_path: Path = MODEL_PATH,
+    gripper_driver_degrees: float = (
+        CERTIFIED_OFFLINE_GRIPPER_REFERENCE_DRIVER_DEGREES
+    ),
 ) -> CollisionFreePathValidation:
     """按当次实测起点检查无接触、且 TCP 不低于 Z=0 的关节路径。"""
 
@@ -639,10 +661,18 @@ def validate_collision_free_joint_path(
         start_joint_radians,
         target_joint_radians,
         kinematics,
+        gripper_driver_degrees=gripper_driver_degrees,
     )
-    verified = SO100PlusMuJoCoTrajectoryValidator(
+    validator = SO100PlusMuJoCoTrajectoryValidator(
         model_path=model_path
-    ).verify_collision_free_sequence((plan,), kinematics)
+    )
+    verified = validator.verify_collision_free_sequence(
+        (plan,),
+        kinematics,
+        gripper_qpos=validator.gripper_driver_degrees_to_qpos(
+            gripper_driver_degrees
+        ),
+    )
     path = np.asarray(verified.sampled_joint_radians, dtype=float)
     positions = np.asarray(
         [kinematics.forward_position(joints) for joints in path],

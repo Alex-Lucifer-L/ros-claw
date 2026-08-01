@@ -1,6 +1,6 @@
 """SO-100 Plus 机械臂适配器。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from threading import Event, Lock
 from typing import Callable, Mapping, Sequence
@@ -8,6 +8,7 @@ from typing import Callable, Mapping, Sequence
 from rosclaw_mini.arm.base import ArmAdapter
 from rosclaw_mini.arm.kinematics import (
     JointMotionPlan,
+    SO100_PLUS_COLLISION_EXECUTION_STEP_RADIANS,
     SO100PlusKinematics,
 )
 from rosclaw_mini.safety.limits import (
@@ -388,6 +389,9 @@ class SO100PlusAdapter(ArmAdapter):
         self.wrist_pitch_p_coefficient = wrist_pitch_p_coefficient
         self.cameras = camera_map
         self._stop_requested = Event()
+        self._action_state_lock = Lock()
+        self._motion_action_active = False
+        self._motion_waypoint_written = False
         self._bus_lock = Lock()
         self._motion_lock = Lock()
         self._wait = wait_func or self._stop_requested.wait
@@ -611,6 +615,33 @@ class SO100PlusAdapter(ArmAdapter):
         self._notify_telemetry(telemetry)
         return previous
 
+    def begin_motion_action(self) -> None:
+        """在命令正式提交前注册动作并初始化 stop 世代。"""
+
+        with self._action_state_lock:
+            if self._motion_action_active:
+                raise RuntimeError("已有机械臂动作注册。")
+            self._stop_requested.clear()
+            self._motion_waypoint_written = False
+            self._motion_action_active = True
+
+    def end_motion_action(self) -> None:
+        """结束已注册动作；不清除动作期间到达的 stop。"""
+
+        with self._action_state_lock:
+            self._motion_action_active = False
+
+    def _begin_motion_action_if_needed(self) -> bool:
+        """为直接 Adapter 调用注册动作，返回是否由本层持有。"""
+
+        with self._action_state_lock:
+            if self._motion_action_active:
+                return False
+            self._stop_requested.clear()
+            self._motion_waypoint_written = False
+            self._motion_action_active = True
+            return True
+
     def move_to(
         self,
         x: float,
@@ -627,10 +658,16 @@ class SO100PlusAdapter(ArmAdapter):
                 "未配置经过确认的运动执行参数，物理移动保持禁用。"
             )
 
-        with self._motion_lock:
-            self._stop_requested.clear()
-            plan = self._plan_move_to_locked(x, y, z)
-            self._execute_motion_plan_locked(plan)
+        owns_action = self._begin_motion_action_if_needed()
+        try:
+            with self._motion_lock:
+                plan = self._plan_move_to_locked(x, y, z)
+                execution_plan = self.materialize_joint_plan(plan)
+                self._last_motion_plan = execution_plan
+                self._execute_motion_plan_locked(execution_plan)
+        finally:
+            if owns_action:
+                self.end_motion_action()
 
     def move_joints(
         self,
@@ -646,10 +683,16 @@ class SO100PlusAdapter(ArmAdapter):
                 "未配置经过确认的运动执行参数，物理移动保持禁用。"
             )
 
-        with self._motion_lock:
-            self._stop_requested.clear()
-            plan = self._plan_joints_locked(joint_radians)
-            self._execute_motion_plan_locked(plan)
+        owns_action = self._begin_motion_action_if_needed()
+        try:
+            with self._motion_lock:
+                plan = self._plan_joints_locked(joint_radians)
+                execution_plan = self.materialize_joint_plan(plan)
+                self._last_motion_plan = execution_plan
+                self._execute_motion_plan_locked(execution_plan)
+        finally:
+            if owns_action:
+                self.end_motion_action()
 
     def plan_move_to(
         self,
@@ -696,46 +739,244 @@ class SO100PlusAdapter(ArmAdapter):
             )
         if not isinstance(plan, JointMotionPlan):
             raise TypeError("execute_joint_plan 需要 JointMotionPlan。")
+        if not plan.is_final_execution_plan:
+            raise ValueError(
+                "execute_joint_plan 只接受预先固化并完成预检的"
+                "最终执行计划。"
+            )
 
-        with self._motion_lock:
-            self._stop_requested.clear()
-            self.motion_limits.validate_target_position(
-                plan.target_position_m
+        owns_action = self._begin_motion_action_if_needed()
+        try:
+            with self._motion_lock:
+                self._raise_if_stop_requested()
+                self._validate_final_execution_plan(plan)
+                self._last_motion_plan = plan
+                self._execute_motion_plan_locked(plan)
+        finally:
+            if owns_action:
+                self.end_motion_action()
+
+    def materialize_joint_plan(
+        self,
+        plan: JointMotionPlan,
+        *,
+        held_gripper_driver_degrees: float | None = None,
+    ) -> JointMotionPlan:
+        """在预检前一次性固化将写给电机的全部目标点。"""
+
+        if not isinstance(plan, JointMotionPlan):
+            raise TypeError("materialize_joint_plan 需要 JointMotionPlan。")
+        if self.motion_config is None:
+            raise SO100PlusMotionExecutionDisabledError(
+                "固化执行计划前必须配置运动执行参数。"
             )
-            previous = self.motion_limits.joints.validate_position(
-                plan.current_joint_radians
+        if plan.is_final_execution_plan:
+            if (
+                held_gripper_driver_degrees is not None
+                and plan.held_gripper_driver_degrees
+                != float(held_gripper_driver_degrees)
+            ):
+                raise ValueError("不允许改写已固化计划的夹爪保持姿态。")
+            return plan
+
+        gripper_degrees = None
+        if held_gripper_driver_degrees is not None:
+            if (
+                isinstance(held_gripper_driver_degrees, bool)
+                or not math.isfinite(float(held_gripper_driver_degrees))
+            ):
+                raise ValueError("夹爪保持姿态必须是有限驱动角。")
+            gripper_degrees = float(held_gripper_driver_degrees)
+
+        raw_has_motion = any(
+            abs(target - current) > 1e-12
+            for current, target in zip(
+                plan.current_joint_radians,
+                plan.target_joint_radians,
+                strict=True,
             )
-            for waypoint in plan.waypoints_radians:
-                previous = self.motion_limits.joints.validate_step(
-                    previous,
-                    waypoint,
-                )
-            target = self.motion_limits.joints.validate_position(
-                plan.target_joint_radians
-            )
-            if plan.waypoints_radians:
-                final_waypoint = tuple(plan.waypoints_radians[-1])
-                if any(
-                    abs(actual - expected) > 1e-12
-                    for actual, expected in zip(
-                        final_waypoint,
-                        target,
-                        strict=True,
-                    )
-                ):
-                    raise ValueError("关节计划的最后轨迹点不是计划终点。")
-            elif any(
+        )
+        if plan.waypoints_radians:
+            if any(
                 abs(actual - expected) > 1e-12
                 for actual, expected in zip(
-                    previous,
+                    plan.waypoints_radians[-1],
+                    plan.target_joint_radians,
+                    strict=True,
+                )
+            ):
+                raise ValueError("待固化计划的最后轨迹点不是计划终点。")
+        elif raw_has_motion:
+            raise ValueError("待固化的非零关节计划缺少轨迹点。")
+
+        if not raw_has_motion:
+            execution_plan = replace(
+                plan,
+                waypoints_radians=(),
+                is_final_execution_plan=True,
+                waypoint_interval_seconds=None,
+                held_gripper_driver_degrees=gripper_degrees,
+            )
+            self._validate_final_execution_plan(execution_plan)
+            return execution_plan
+
+        frequency_hz = self.motion_config.stream_frequency_hz
+        if frequency_hz is None:
+            route = (
+                tuple(plan.current_joint_radians),
+                *tuple(plan.waypoints_radians),
+            )
+            dense_waypoints: list[tuple[float, ...]] = []
+            for start, target in zip(route, route[1:]):
+                delta = tuple(
+                    end - begin
+                    for begin, end in zip(start, target, strict=True)
+                )
+                step_count = max(
+                    1,
+                    math.ceil(
+                        max(abs(value) for value in delta)
+                        / SO100_PLUS_COLLISION_EXECUTION_STEP_RADIANS
+                    ),
+                )
+                dense_waypoints.extend(
+                    tuple(
+                        begin + change * (index / step_count)
+                        for begin, change in zip(
+                            start,
+                            delta,
+                            strict=True,
+                        )
+                    )
+                    for index in range(1, step_count + 1)
+                )
+            waypoints = tuple(dense_waypoints)
+            interval_seconds = None
+        else:
+            max_delta_degrees = max(
+                abs(math.degrees(target - current))
+                for current, target in zip(
+                    plan.current_joint_radians,
+                    plan.target_joint_radians,
+                    strict=True,
+                )
+            )
+            duration_seconds = (
+                max_delta_degrees
+                * math.pi
+                / (
+                    2.0
+                    * self.motion_config.stream_max_joint_speed_degrees_per_second
+                )
+            )
+            sample_count = max(
+                1,
+                math.ceil(duration_seconds * frequency_hz),
+            )
+            while True:
+                waypoints = tuple(
+                    tuple(
+                        current
+                        + (target - current)
+                        * (
+                            0.5
+                            - 0.5
+                            * math.cos(
+                                math.pi * (sample_index / sample_count)
+                            )
+                        )
+                        for current, target in zip(
+                            plan.current_joint_radians,
+                            plan.target_joint_radians,
+                            strict=True,
+                        )
+                    )
+                    for sample_index in range(1, sample_count + 1)
+                )
+                previous = plan.current_joint_radians
+                largest_step = 0.0
+                for waypoint in waypoints:
+                    largest_step = max(
+                        largest_step,
+                        *(
+                            abs(target - current)
+                            for current, target in zip(
+                                previous,
+                                waypoint,
+                                strict=True,
+                            )
+                        ),
+                    )
+                    previous = waypoint
+                if (
+                    largest_step
+                    <= SO100_PLUS_COLLISION_EXECUTION_STEP_RADIANS
+                    + 1e-12
+                ):
+                    break
+                sample_count += 1
+            interval_seconds = 1.0 / frequency_hz
+
+        execution_plan = replace(
+            plan,
+            waypoints_radians=waypoints,
+            is_final_execution_plan=True,
+            waypoint_interval_seconds=interval_seconds,
+            held_gripper_driver_degrees=gripper_degrees,
+        )
+        self._validate_final_execution_plan(execution_plan)
+        return execution_plan
+
+    def _validate_final_execution_plan(self, plan: JointMotionPlan) -> None:
+        """复核固化计划，不生成或修改任何 waypoint。"""
+
+        if not plan.is_final_execution_plan:
+            raise ValueError("关节计划尚未固化为最终执行点。")
+        interval = plan.waypoint_interval_seconds
+        if interval is not None and (
+            isinstance(interval, bool)
+            or not math.isfinite(interval)
+            or interval <= 0
+        ):
+            raise ValueError("最终执行计划的 waypoint 间隔必须为有限正数。")
+        if plan.held_gripper_driver_degrees is not None and (
+            isinstance(plan.held_gripper_driver_degrees, bool)
+            or not math.isfinite(plan.held_gripper_driver_degrees)
+        ):
+            raise ValueError("最终执行计划的夹爪保持角必须为有限数值。")
+
+        self.motion_limits.validate_target_position(plan.target_position_m)
+        previous = self.motion_limits.joints.validate_position(
+            plan.current_joint_radians
+        )
+        for waypoint in plan.waypoints_radians:
+            previous = self.motion_limits.joints.validate_step(
+                previous,
+                waypoint,
+            )
+        target = self.motion_limits.joints.validate_position(
+            plan.target_joint_radians
+        )
+        if plan.waypoints_radians:
+            final_waypoint = tuple(plan.waypoints_radians[-1])
+            if any(
+                abs(actual - expected) > 1e-12
+                for actual, expected in zip(
+                    final_waypoint,
                     target,
                     strict=True,
                 )
             ):
-                raise ValueError("非零关节计划缺少轨迹点。")
-
-            self._last_motion_plan = plan
-            self._execute_motion_plan_locked(plan)
+                raise ValueError("关节计划的最后轨迹点不是计划终点。")
+        elif any(
+            abs(actual - expected) > 1e-12
+            for actual, expected in zip(
+                previous,
+                target,
+                strict=True,
+            )
+        ):
+            raise ValueError("非零关节计划缺少轨迹点。")
 
     def _raise_if_motion_planning_disabled(self) -> None:
         if self.kinematics is None or self.motion_limits is None:
@@ -791,6 +1032,8 @@ class SO100PlusAdapter(ArmAdapter):
         if not plan.waypoints_radians:
             return
 
+        self._raise_if_stop_requested()
+        self._validate_final_execution_plan(plan)
         self._last_settle_report = None
         self._load_limit_streak.clear()
         self._temperature_limit_streak.clear()
@@ -799,6 +1042,31 @@ class SO100PlusAdapter(ArmAdapter):
             motor_names, held_positions = self._read_all_positions_locked(
                 follower_bus
             )
+            if plan.held_gripper_driver_degrees is not None:
+                try:
+                    gripper_index = motor_names.index(GRIPPER_MOTOR_NAME)
+                except ValueError as error:
+                    raise SO100PlusArmSafetyError(
+                        "执行计划时缺少 gripper_joint 反馈。"
+                    ) from error
+                actual_gripper_degrees = held_positions[gripper_index]
+                if (
+                    abs(
+                        actual_gripper_degrees
+                        - plan.held_gripper_driver_degrees
+                    )
+                    > self.gripper_config.position_tolerance_degrees
+                ):
+                    raise SO100PlusArmSafetyError(
+                        "夹爪实测姿态与 MuJoCo 预检姿态不一致："
+                        f"预检 {plan.held_gripper_driver_degrees:.6f}°，"
+                        f"实测 {actual_gripper_degrees:.6f}°，超过 "
+                        f"{self.gripper_config.position_tolerance_degrees:.1f}° "
+                        "保持容差。"
+                    )
+                held = list(held_positions)
+                held[gripper_index] = plan.held_gripper_driver_degrees
+                held_positions = tuple(held)
             start_telemetry = self._capture_telemetry_locked(
                 follower_bus,
                 phase="arm_start",
@@ -806,7 +1074,7 @@ class SO100PlusAdapter(ArmAdapter):
         self._notify_telemetry(start_telemetry)
         self._raise_if_arm_telemetry_unsafe(start_telemetry, start_telemetry)
 
-        if self.motion_config.stream_frequency_hz is not None:
+        if plan.waypoint_interval_seconds is not None:
             final_positions = self._execute_streaming_motion_plan(
                 follower_bus,
                 motor_names,
@@ -823,9 +1091,10 @@ class SO100PlusAdapter(ArmAdapter):
                     held_positions,
                     waypoint,
                 )
-                with self._bus_lock:
-                    self._raise_if_stop_requested()
-                    follower_bus.write("Goal_Position", list(target_positions))
+                self._write_motion_target(
+                    follower_bus,
+                    target_positions,
+                )
 
                 final_positions = self._wait_for_arm_waypoint(
                     follower_bus,
@@ -849,65 +1118,36 @@ class SO100PlusAdapter(ArmAdapter):
         plan: JointMotionPlan,
         start_telemetry: SO100PlusTelemetry,
     ) -> tuple[float, ...]:
-        """用余弦缓入缓出连续发送关节目标，最后再等待精确到位。"""
+        """原样发送预检前固化的 30 Hz 关节目标点。"""
 
-        frequency_hz = self.motion_config.stream_frequency_hz
-        interval_seconds = 1.0 / frequency_hz
-        max_delta_degrees = max(
-            abs(math.degrees(target - current))
-            for current, target in zip(
-                plan.current_joint_radians,
-                plan.target_joint_radians,
-                strict=True,
-            )
-        )
-        duration_seconds = (
-            max_delta_degrees
-            * math.pi
-            / (
-                2.0
-                * self.motion_config.stream_max_joint_speed_degrees_per_second
-            )
-        )
-        sample_count = max(1, math.ceil(duration_seconds * frequency_hz))
+        interval_seconds = plan.waypoint_interval_seconds
+        if interval_seconds is None:
+            raise ValueError("流式执行计划缺少 waypoint 时间间隔。")
         telemetry_stride = max(
             1,
             round(
                 self.motion_config.stream_telemetry_interval_seconds
-                * frequency_hz
+                / interval_seconds
             ),
         )
-        previous_waypoint = plan.current_joint_radians
         final_positions = held_positions
         final_target_positions = held_positions
+        sample_count = len(plan.waypoints_radians)
 
-        for sample_index in range(1, sample_count + 1):
+        for sample_index, waypoint in enumerate(
+            plan.waypoints_radians,
+            start=1,
+        ):
             self._raise_if_stop_requested()
-            fraction = sample_index / sample_count
-            smooth_fraction = 0.5 - 0.5 * math.cos(math.pi * fraction)
-            waypoint = tuple(
-                current + (target - current) * smooth_fraction
-                for current, target in zip(
-                    plan.current_joint_radians,
-                    plan.target_joint_radians,
-                    strict=True,
-                )
-            )
-            self.motion_limits.joints.validate_step(
-                previous_waypoint,
-                waypoint,
-            )
             final_target_positions = self._compose_arm_target(
                 motor_names,
                 held_positions,
                 waypoint,
             )
-            with self._bus_lock:
-                self._raise_if_stop_requested()
-                follower_bus.write(
-                    "Goal_Position",
-                    list(final_target_positions),
-                )
+            self._write_motion_target(
+                follower_bus,
+                final_target_positions,
+            )
 
             stopped_while_waiting = self._wait(interval_seconds)
             if stopped_while_waiting or self._stop_requested.is_set():
@@ -973,14 +1213,29 @@ class SO100PlusAdapter(ArmAdapter):
             finally:
                 if step_telemetry is not None:
                     self._notify_telemetry(step_telemetry)
-            previous_waypoint = waypoint
-
         return self._wait_for_arm_waypoint(
             follower_bus,
             motor_names,
             final_target_positions,
             start_telemetry,
         )
+
+    def _write_motion_target(
+        self,
+        follower_bus,
+        target_positions: Sequence[float],
+    ) -> None:
+        """stop 与第一条/后续电机目标在同一动作锁上排序。"""
+
+        with self._action_state_lock:
+            self._raise_if_stop_requested()
+            with self._bus_lock:
+                self._raise_if_stop_requested()
+                follower_bus.write(
+                    "Goal_Position",
+                    list(target_positions),
+                )
+            self._motion_waypoint_written = True
 
     def _validate_final_tcp_position(
         self,
@@ -1205,11 +1460,19 @@ class SO100PlusAdapter(ArmAdapter):
         if not self.is_connected:
             raise RuntimeError("停止操作前必须先显式连接机械臂。")
 
-        self._stop_requested.set()
+        with self._action_state_lock:
+            self._stop_requested.set()
+            # stop 在首条动作指令前到达时，不能把“保持”
+            # 写入误计为动作；事件会使后续首条指令失败。
+            should_write_hold = (
+                not self._motion_action_active
+                or self._motion_waypoint_written
+            )
         follower_bus = self._follower_bus()
         with self._bus_lock:
             present_positions = follower_bus.read("Present_Position")
-            follower_bus.write("Goal_Position", present_positions)
+            if should_write_hold:
+                follower_bus.write("Goal_Position", present_positions)
             telemetry = self._capture_telemetry_locked(
                 follower_bus,
                 phase="stopped",
@@ -1257,9 +1520,14 @@ class SO100PlusAdapter(ArmAdapter):
         if not self.is_connected:
             raise RuntimeError("夹爪操作前必须先显式连接机械臂。")
 
-        with self._motion_lock:
-            self._stop_requested.clear()
-            self._move_gripper_to_locked(final_target_degrees)
+        owns_action = self._begin_motion_action_if_needed()
+        try:
+            with self._motion_lock:
+                self._raise_if_stop_requested()
+                self._move_gripper_to_locked(final_target_degrees)
+        finally:
+            if owns_action:
+                self.end_motion_action()
 
     def _move_gripper_to_locked(self, final_target_degrees: float) -> None:
         follower_bus = self._follower_bus()
@@ -1289,13 +1557,16 @@ class SO100PlusAdapter(ArmAdapter):
                 distance,
             )
             step_target_degrees = position_degrees + step
-            with self._bus_lock:
+            with self._action_state_lock:
                 self._raise_if_stop_requested()
-                follower_bus.write(
-                    "Goal_Position",
-                    [step_target_degrees],
-                    GRIPPER_MOTOR_NAME,
-                )
+                with self._bus_lock:
+                    self._raise_if_stop_requested()
+                    follower_bus.write(
+                        "Goal_Position",
+                        [step_target_degrees],
+                        GRIPPER_MOTOR_NAME,
+                    )
+                self._motion_waypoint_written = True
 
             stopped_while_waiting = self._wait(
                 self.gripper_config.settle_seconds
