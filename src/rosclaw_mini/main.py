@@ -1,12 +1,15 @@
 """RosClaw Mini 的 JSON 命令行入口。"""
 
 import argparse
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import json
+import os
 from pathlib import Path
 import uuid
 from rosclaw_mini.command_schema.commands import Command
+from rosclaw_mini.llm.client import LLMClient, LLMClientError
 from rosclaw_mini.llm.command_generator import CommandGenerator
+from rosclaw_mini.llm.openai_compatible_client import OpenAICompatibleClient
 from rosclaw_mini.arm.so100_plus_factory import SO100PlusRobotConfig
 from rosclaw_mini.llm.command_parser import parse_json_command
 from rosclaw_mini.runtime import (
@@ -22,11 +25,18 @@ from rosclaw_mini.runtime import (
 InputFunction = Callable[[str], str]###定义了一个类型别名 InputFunction，它表示一个可调用对象（函数或方法），该对象接受一个字符串参数并返回一个字符串。这个类型别名用于表示输入函数的签名，通常用于从用户获取输入。
 OutputFunction = Callable[[str], None]###定义了一个类型别名 OutputFunction，它表示一个可调用对象（函数或方法），该对象接受一个字符串参数并返回 None。这个类型别名用于表示输出函数的签名，通常用于向用户显示输出信息。
 RuntimeBuilder = Callable[[argparse.Namespace], ArmRuntime]###定义了一个类型别名 RuntimeBuilder，它表示一个可调用对象（函数或方法），该对象接受一个 argparse.Namespace 对象作为参数并返回一个 ArmRuntime 对象。这个类型别名用于表示运行时构建器的签名，通常用于根据命令行参数创建和配置 ArmRuntime 实例。
+LLMClientBuilder = Callable[..., LLMClient]
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="运行 RosClaw Mini JSON → Gateway → Skill 命令链路。",
+        description="运行 RosClaw Mini 输入 → Gateway → Skill 命令链路。",
+    )
+    parser.add_argument(
+        "--input-mode",
+        choices=("json", "llm"),
+        default="json",
+        help="输入模式；默认 json，llm 使用 OpenAI-compatible 服务。",
     )
     parser.add_argument(
         "--backend",
@@ -72,6 +82,41 @@ def build_runtime_from_args(args: argparse.Namespace) -> ArmRuntime:
             follower_name=args.follower_name,
         ),
         risk_acknowledged=args.acknowledge_so100_plus_risk,
+    )
+
+
+def build_llm_client_from_environment(
+    *,
+    environ: Mapping[str, str],
+    client_builder: LLMClientBuilder = OpenAICompatibleClient,
+) -> LLMClient:
+    """读取显式环境配置；本函数不发起网络请求。"""
+
+    base_url = environ.get("ROSCLAW_LLM_BASE_URL", "").strip()
+    model = environ.get("ROSCLAW_LLM_MODEL", "").strip()
+    missing = tuple(
+        name
+        for name, value in (
+            ("ROSCLAW_LLM_BASE_URL", base_url),
+            ("ROSCLAW_LLM_MODEL", model),
+        )
+        if not value
+    )
+    if missing:
+        raise ValueError(
+            "LLM 模式缺少必填环境变量: " + ", ".join(missing)
+        )
+
+    api_key_value = environ.get("ROSCLAW_LLM_API_KEY")
+    api_key = (
+        api_key_value.strip()
+        if api_key_value is not None and api_key_value.strip()
+        else None
+    )
+    return client_builder(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
     )
 
 def dispatch_command(
@@ -177,6 +222,9 @@ def run_llm_command_loop(
 
         try:
             command = generator.generate(user_input)
+        except LLMClientError as error:
+            output_func(f"LLM 调用失败: {error}")
+            continue
         except json.JSONDecodeError:
             output_func("模型返回的内容不是合法 JSON")
             continue
@@ -193,6 +241,8 @@ def main(
     input_func: InputFunction = input,
     output_func: OutputFunction = print,
     runtime_builder: RuntimeBuilder = build_runtime_from_args,
+    llm_client_builder: LLMClientBuilder = OpenAICompatibleClient,
+    environ: Mapping[str, str] | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -204,6 +254,17 @@ def main(
             "真机模式必须同时传入 --acknowledge-so100-plus-risk；"
             "该模式会连接电机、启用力矩，并允许 Skill 产生真实运动。"
         )
+
+    llm_client: LLMClient | None = None
+    if args.input_mode == "llm":
+        try:
+            llm_client = build_llm_client_from_environment(
+                environ=os.environ if environ is None else environ,
+                client_builder=llm_client_builder,
+            )
+        except (ValueError, LLMClientError) as error:
+            output_func(f"LLM 配置错误: {error}")
+            return 2
 
     try:
         runtime = runtime_builder(args)
@@ -239,11 +300,23 @@ def main(
             output_func(f"启动 TCP (m): {position}")
         if runtime.move_arm_disabled_reason is not None:
             output_func(runtime.move_arm_disabled_reason)
-        run_json_command_loop(
-            runtime,
-            input_func=input_func,
-            output_func=output_func,
-        )
+        if args.input_mode == "llm":
+            generator = CommandGenerator(
+                client=llm_client,
+                skills=runtime.skills,
+            )
+            run_llm_command_loop(
+                runtime,
+                generator,
+                input_func=input_func,
+                output_func=output_func,
+            )
+        else:
+            run_json_command_loop(
+                runtime,
+                input_func=input_func,
+                output_func=output_func,
+            )
     except KeyboardInterrupt:
         output_func("\n收到 Ctrl+C，正在停止并断开连接。")
         exit_code = 130

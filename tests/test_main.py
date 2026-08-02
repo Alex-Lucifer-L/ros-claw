@@ -4,6 +4,7 @@ import pytest
 
 import rosclaw_mini.main as main_module
 from rosclaw_mini.main import (
+    build_llm_client_from_environment,
     build_parser,
     build_runtime_from_args,
     main,
@@ -13,6 +14,7 @@ from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.arm.so100_plus_session import ArmSessionState
 from rosclaw_mini.command_schema.commands import ExecutionResult
 from rosclaw_mini.execution.controller import ExecutionController
+from rosclaw_mini.llm.fake_client import FakeLLMClient
 from rosclaw_mini.runtime import ArmRuntimeShutdownError, build_mock_runtime
 
 
@@ -39,6 +41,55 @@ def test_runtime_from_default_arguments_builds_mock_without_devices():
     assert runtime.adapter.is_connected is True
 
     runtime.shutdown()
+
+
+def test_parser_defaults_to_json_input_mode():
+    args = build_parser().parse_args([])
+
+    assert args.input_mode == "json"
+
+
+def test_llm_environment_creates_client_with_api_key():
+    received = {}
+    expected_client = FakeLLMClient(response="{}")
+
+    def client_builder(**kwargs):
+        received.update(kwargs)
+        return expected_client
+
+    client = build_llm_client_from_environment(
+        environ={
+            "ROSCLAW_LLM_BASE_URL": " http://localhost:11434/v1 ",
+            "ROSCLAW_LLM_MODEL": " qwen-test ",
+            "ROSCLAW_LLM_API_KEY": " placeholder-key ",
+        },
+        client_builder=client_builder,
+    )
+
+    assert client is expected_client
+    assert received == {
+        "base_url": "http://localhost:11434/v1",
+        "model": "qwen-test",
+        "api_key": "placeholder-key",
+    }
+
+
+def test_llm_environment_allows_missing_api_key():
+    received = {}
+
+    def client_builder(**kwargs):
+        received.update(kwargs)
+        return FakeLLMClient(response="{}")
+
+    build_llm_client_from_environment(
+        environ={
+            "ROSCLAW_LLM_BASE_URL": "http://localhost:11434/v1",
+            "ROSCLAW_LLM_MODEL": "local-model",
+        },
+        client_builder=client_builder,
+    )
+
+    assert received["api_key"] is None
 
 
 def test_runtime_from_real_arguments_builds_robot_config_without_devices(
@@ -105,6 +156,82 @@ def test_main_defaults_to_mock_and_shuts_down_on_exit():
     assert received_backend == "mock"
     assert runtime.shutdown_calls == 1
     assert "当前后端: mock" in outputs
+
+
+def test_main_default_json_mode_does_not_create_llm_client():
+    runtime = FakeRuntime()
+
+    def forbidden_client_builder(**_kwargs):
+        raise AssertionError("默认 JSON 模式不应创建 LLM 客户端")
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: "exit",
+        output_func=lambda _message: None,
+        runtime_builder=lambda _args: runtime,
+        llm_client_builder=forbidden_client_builder,
+        environ={},
+    )
+
+    assert exit_code == 0
+    assert runtime.shutdown_calls == 1
+
+
+def test_main_llm_mode_rejects_missing_configuration_before_runtime():
+    runtime_builder_called = False
+    outputs: list[str] = []
+
+    def forbidden_runtime_builder(_args):
+        nonlocal runtime_builder_called
+        runtime_builder_called = True
+        raise AssertionError("LLM 配置无效时不应创建 Runtime")
+
+    exit_code = main(
+        ["--input-mode", "llm"],
+        output_func=outputs.append,
+        runtime_builder=forbidden_runtime_builder,
+        environ={},
+    )
+
+    assert exit_code != 0
+    assert runtime_builder_called is False
+    assert any("ROSCLAW_LLM_BASE_URL" in message for message in outputs)
+    assert any("ROSCLAW_LLM_MODEL" in message for message in outputs)
+
+
+def test_main_llm_mode_runs_natural_language_through_mock_runtime():
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    client = FakeLLMClient(
+        response='{"skill_name": "open_gripper", "params": {}}'
+    )
+    outputs: list[str] = []
+    input_count = 0
+
+    def input_command(_prompt):
+        nonlocal input_count
+        input_count += 1
+        if input_count == 1:
+            return "请打开夹爪"
+        if input_count == 2:
+            assert runtime.controller.wait(timeout=1.0) is not None
+            return "result"
+        return "exit"
+
+    exit_code = main(
+        ["--input-mode", "llm"],
+        input_func=input_command,
+        output_func=outputs.append,
+        runtime_builder=lambda _args: runtime,
+        llm_client_builder=lambda **_kwargs: client,
+        environ={
+            "ROSCLAW_LLM_BASE_URL": "http://localhost:11434/v1",
+            "ROSCLAW_LLM_MODEL": "local-model",
+        },
+    )
+
+    assert exit_code == 0
+    assert runtime.adapter.gripper_is_open is True
+    assert any("open_gripper" in message for message in outputs)
 
 
 def test_main_rejects_real_backend_without_risk_acknowledgement():

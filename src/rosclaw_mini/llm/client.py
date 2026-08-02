@@ -1,9 +1,13 @@
 from typing import Protocol
 
 
+class LLMClientError(RuntimeError):
+    """调用 LLM 服务或解析服务响应时发生的错误。"""
+
+
 class LLMClient(Protocol):
     def generate(self, prompt: str) -> str:
         """
-        调用LLM，生成统一的JSON格式的指令。该方法接受一个字符串类型的 prompt 参数，表示输入的提示信息，并返回一个字符串类型的结果，表示生成的JSON格式指令。
+        接收完整提示词，返回模型生成的文本。
         """
         ...

@@ -1,5 +1,6 @@
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.llm.command_generator import CommandGenerator
+from rosclaw_mini.llm.client import LLMClientError
 from rosclaw_mini.llm.fake_client import FakeLLMClient
 from rosclaw_mini.llm.prompt_builder import build_command_prompt
 from rosclaw_mini.skills.base import SkillDefinition
@@ -92,6 +93,50 @@ def test_llm_command_runs_through_existing_execution_chain() -> None:
 
     result = runtime.controller.wait(timeout=1.0)
 
+    assert result is not None
+    assert result.success is True
+    assert result.skill_name == "open_gripper"
+    assert runtime.adapter.gripper_is_open is True
+
+    runtime.shutdown()
+
+
+def test_llm_loop_reports_client_error_and_allows_next_input() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+
+    class RecoveringLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, _prompt: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMClientError("测试连接失败")
+            return '{"skill_name": "open_gripper", "params": {}}'
+
+    client = RecoveringLLMClient()
+    generator = CommandGenerator(client=client, skills=runtime.skills)
+    outputs: list[str] = []
+    input_count = 0
+
+    def input_command(_prompt: str) -> str:
+        nonlocal input_count
+        input_count += 1
+        if input_count <= 2:
+            return "请打开夹爪"
+        assert runtime.controller.wait(timeout=1.0) is not None
+        return "exit"
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=input_command,
+        output_func=outputs.append,
+    )
+    result = runtime.controller.wait(timeout=1.0)
+
+    assert client.calls == 2
+    assert any("LLM 调用失败: 测试连接失败" in message for message in outputs)
     assert result is not None
     assert result.success is True
     assert result.skill_name == "open_gripper"
