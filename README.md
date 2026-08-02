@@ -4,7 +4,11 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 
 > 怎样让一条上层命令先经过结构校验、技能查询和安全检查，再通过统一接口落到 Mock 或真实机械臂。
 
-当前仓库已经完成默认 Mock 主链路，以及 SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护和可选摄像头接口。统一 JSON 入口支持显式选择 `mock` 或 `so100_plus`；默认仍是 Mock，真机还必须额外确认连接、上力和运动风险。
+当前仓库已经完成默认 Mock 主链路、OpenAI-compatible 自然语言入口，以及
+SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护和可选摄像头
+接口。统一程序入口可以独立选择 `json/llm` 输入模式和
+`mock/so100_plus` 机械臂后端；默认仍是 `json + mock`，真机还必须额外
+确认连接、上力和运动风险。
 
 > [!IMPORTANT]
 > 普通启动命令和默认 `pytest` 不会连接真实机械臂、启用力矩、修改校准或打开摄像头。`SO100PlusAdapter.connect()` 则不是只读操作：它会连接电机、同步目标、写入运行参数并启用力矩。执行任何真机脚本前，操作者必须在机械臂旁、清空路径，并能立即物理断电。
@@ -31,7 +35,11 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 
 ### 一句话结论
 
-当前阶段已经完成“真实 SO-100 Plus 单臂的底层接入、受控验证和 JSON 主链路装配”。真机入口已经可启动，但仍属于需要操作者在场的教学原型，不是无人值守应用。
+当前阶段已经完成“真实 SO-100 Plus 单臂的底层接入、受控验证，以及 JSON
+和自然语言两种输入到现有执行链的装配”。真机入口已经可启动，但仍属于
+需要操作者在场的教学原型，不是无人值守应用。LLM 在本项目中只负责把
+自然语言转换成现有 `Command`，不会绕过 Gateway、Validator 或 Safety
+Checker。
 
 ### 完成状态
 
@@ -49,12 +57,15 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
 | USB 摄像头接口 | 软件接口和 FakeCamera 测试完成 | 否，真实单帧尚未验收 |
 | 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
+| OpenAI-compatible 同步 LLM 客户端 | 已实现，API Key 可选 | 是，必须显式选择 `--input-mode llm` |
+| 自然语言 → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
 | 配置文件加载 | `configs/*.yaml` 仍为空且未接线 | 否 |
-| LLM、RAG、Web、ROS 2 | 尚未形成可用链路 | 否 |
+| RAG、Web、ROS 2 | 目录或原型存在，尚未接入正式入口 | 否 |
 
 ### 现在可以安全做什么
 
 - 运行默认 Mock 交互入口；
+- 使用 Mock 后端调用 OpenAI-compatible 服务生成命令；
 - 运行完整单元测试；
 - 离线计算 FK、IK、TCP 和轨迹；
 - 在 MuJoCo 中查看模型、TCP 和路径；
@@ -84,13 +95,29 @@ conda activate rosclaw-mini-py310
 cd rosclaw-mini
 ```
 
-### 启动默认入口
+### 启动默认 JSON + Mock 入口
 
 ```bash
 PYTHONPATH=src python -m rosclaw_mini.main
 ```
 
-不传 `--backend` 时，入口固定选择 `MockArmAdapter`，不会访问 `/dev/lerobot_right`。它接受结构化 JSON，不会调用大语言模型。
+不传参数时等价于：
+
+```bash
+PYTHONPATH=src python -m rosclaw_mini.main \
+  --input-mode json \
+  --backend mock
+```
+
+它使用 `MockArmAdapter`，不会访问 `/dev/lerobot_right`，也不会调用大语言
+模型。输入模式和机械臂后端是两个互相独立的选项：
+
+| 输入模式 | 后端 | 含义 |
+| --- | --- | --- |
+| `json` | `mock` | 默认、完全本地的结构化命令演示 |
+| `llm` | `mock` | 调用模型生成 Command，但只操作内存 Mock |
+| `json` | `so100_plus` | 人工提供结构化命令，显式连接真机 |
+| `llm` | `so100_plus` | 模型生成 Command，再经过完整安全链控制真机；风险最高 |
 
 移动 Mock TCP：
 
@@ -120,18 +147,117 @@ exit
 
 `main.py` 中的 Mock 移动默认持续 5 秒，目的是让后台执行和运动中 `stop` 更容易观察。正在执行普通动作时不能再提交第二个普通动作，但仍可以提交 `stop`。
 
+### 使用 OpenAI-compatible 自然语言入口
+
+LLM 模式复用已有 `CommandGenerator`、JSON Command Parser、Gateway、
+Skill Validator、Safety Checker 和 `ExecutionController`。模型只承担一项
+职责：根据当前启用的 Skill，把自然语言转换为下面这种 JSON：
+
+```json
+{"skill_name": "open_gripper", "params": {}}
+```
+
+正式链路是：
+
+```text
+自然语言
+→ OpenAICompatibleClient.generate(prompt)
+→ POST {base_url}/chat/completions
+→ choices[0].message.content
+→ CommandGenerator
+→ parse_json_command()
+→ Command
+→ ExecutionController
+→ Gateway
+→ Skill Validator
+→ Safety Checker
+→ Mock 或 SO-100 Plus Adapter
+```
+
+需要配置以下环境变量：
+
+| 环境变量 | 必填 | 含义 |
+| --- | --- | --- |
+| `ROSCLAW_LLM_BASE_URL` | 是 | OpenAI-compatible API 根地址；客户端会追加 `/chat/completions` |
+| `ROSCLAW_LLM_MODEL` | 是 | 服务端接受的模型 ID |
+| `ROSCLAW_LLM_API_KEY` | 否 | Bearer Token；本地 Ollama 等无鉴权服务可以不设置 |
+
+配置会在创建 `ArmRuntime` **之前**检查。`BASE_URL` 或 `MODEL` 缺失时，
+程序返回非零退出码，不创建机械臂 Runtime，因此即使命令行同时写了真机
+后端，也不会因为 LLM 配置错误而连接机械臂。API Key 只从环境变量进入
+请求头，不应写入源码、README、日志或提交记录。
+
+第一次真实模型调用应继续使用 Mock 后端。例如本地 Ollama-compatible
+服务：
+
+```bash
+export ROSCLAW_LLM_BASE_URL="http://127.0.0.1:11434/v1"
+export ROSCLAW_LLM_MODEL="<本机已经安装的模型名称>"
+unset ROSCLAW_LLM_API_KEY
+
+PYTHONPATH=src python -m rosclaw_mini.main \
+  --input-mode llm \
+  --backend mock
+```
+
+DeepSeek-compatible 服务示例：
+
+```bash
+export ROSCLAW_LLM_BASE_URL="https://<DeepSeek-compatible-host>/v1"
+export ROSCLAW_LLM_MODEL="<模型 ID>"
+export ROSCLAW_LLM_API_KEY="<你的 API Key>"
+
+PYTHONPATH=src python -m rosclaw_mini.main \
+  --input-mode llm \
+  --backend mock
+```
+
+Qwen 或其他 OpenAI-compatible 服务示例：
+
+```bash
+export ROSCLAW_LLM_BASE_URL="https://<OpenAI-compatible-host>/v1"
+export ROSCLAW_LLM_MODEL="<模型 ID>"
+export ROSCLAW_LLM_API_KEY="<你的 API Key>"
+
+PYTHONPATH=src python -m rosclaw_mini.main \
+  --input-mode llm \
+  --backend mock
+```
+
+启动后可输入自然语言，例如：
+
+```text
+请打开夹爪
+```
+
+`result` 和 `exit` 由本地输入循环直接处理，不会发送给模型。其他输入会
+先调用模型；如果发生连接失败、超时、HTTP 错误、服务响应不是合法 JSON、
+缺少 `choices[0].message.content` 或内容为空，程序会显示
+`LLM 调用失败` 并继续等待下一条输入。模型输出不是合法 Command 时也只会
+拒绝本次输入，不会绕过原有安全检查。
+
+> [!WARNING]
+> `llm` 只是输入方式，不是安全授权。模型可能理解错误或生成错误参数；
+> 使用真机时，命令仍必须通过会话状态、Skill、参数、工作空间、运动学、
+> 轨迹和运行期保护。首次模型联调只使用 `--backend mock`。
+
 ### 显式启动 SO-100 Plus
 
 > 下面的命令会连接真实机械臂并启用力矩。这里只记录入口用法；本次 README 更新没有执行该命令。
 
 ```bash
 PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
+  --input-mode json \
   --backend so100_plus \
   --port /dev/lerobot_right \
   --calibration-dir lerobot-joycon_plus/.cache/calibration/so100_plus \
   --follower-name right \
   --acknowledge-so100-plus-risk
 ```
+
+这里显式写出 `--input-mode json`，方便审查真实动作。真机也支持
+`--input-mode llm`，但应当在模型、Prompt 和命令结果已经用 Mock 验证后
+再考虑使用；LLM 模式不会降低或替代任何真机门禁。
 
 真机运行时复用现有 `SO100PlusRobotConfig`、Factory、运动学、正式 `MotionLimits`、`SO100PlusAdapter` 和 `build_so100_plus_right_follower_arm_skills()`。缺少风险确认、端口不是 `/dev/lerobot_right`，或校准文件 SHA-256 与已认证的 `right_follower.json` 不一致时，程序会在创建 Robot 和访问串口之前拒绝启动。
 
@@ -207,36 +333,45 @@ MuJoCo 接触替身，不打开真实串口和视频设备。测试数量不在�
 
 ```mermaid
 flowchart TD
-    A[JSON 或未来上层输入] --> B[Parser: 解析为 Command]
-    B --> C[Skill Registry: 查找 SkillDefinition]
+    A{input-mode}
+    A -->|json| B[JSON 输入]
+    A -->|llm| C[自然语言输入]
+    C --> D[OpenAI-compatible Client]
+    D --> E[CommandGenerator]
+    E --> F[模型返回 JSON]
+    B --> G[Command Parser]
+    F --> G
+    G --> H[Command]
+    H --> I[ExecutionController]
+    I --> J[Skill Registry: 查找 SkillDefinition]
 
-    C -->|不存在| X[失败 ExecutionResult]
-    C -->|存在| D{enabled?}
-    D -->|否| X
-    D -->|是| E[Validator: 参数结构]
+    J -->|不存在| X[失败 ExecutionResult]
+    J -->|存在| K{enabled?}
+    K -->|否| X
+    K -->|是| L[Validator: 参数结构]
 
-    E -->|缺参数、类型错误、额外参数| X
-    E -->|通过| F[Safety Checker: ParamSpec 数值边界]
-    F -->|越界、NaN、Infinity| X
-    F -->|通过| G[Gateway 调用 Handler]
+    L -->|缺参数、类型错误、额外参数| X
+    L -->|通过| M[Safety Checker: ParamSpec 数值边界]
+    M -->|越界、NaN、Infinity| X
+    M -->|通过| N[Gateway 调用 Handler]
 
-    G --> H[ArmHandlers]
-    H --> I{ArmAdapter 后端}
+    N --> O[ArmHandlers / Session]
+    O --> P{ArmAdapter 后端}
 
-    I -->|默认| J[MockArmAdapter]
-    I -->|显式真机配置| K[SO100PlusAdapter]
+    P -->|默认| Q[MockArmAdapter]
+    P -->|显式真机配置| R[SO100PlusAdapter]
 
-    J --> L[内存中的模拟状态]
-    K --> M[运动学 + 关节/工作空间限制 + 轨迹保护]
-    M --> N[LeRobot ManipulatorRobot]
-    N --> O[FeetechMotorsBus]
-    O --> P[7 个 STS3215 电机]
+    Q --> S[内存中的模拟状态]
+    R --> T[会话状态 + 运动学 + 轨迹保护]
+    T --> U[LeRobot ManipulatorRobot]
+    U --> V[FeetechMotorsBus]
+    V --> W[7 个 STS3215 电机]
 
-    K -. 独立可选接口 .-> Q[OpenCV USB Camera]
+    R -. 独立可选接口 .-> CAMERA[OpenCV USB Camera]
 
-    L --> Y[成功 ExecutionResult]
-    P --> Y
-    G -->|Handler 或 Adapter 异常| X
+    S --> Y[成功 ExecutionResult]
+    W --> Y
+    N -->|Handler 或 Adapter 异常| X
 ```
 
 摄像头画成虚线，是因为它由 `SO100PlusAdapter` 暴露统一接口，但生命周期与机械臂连接完全独立：不配置摄像头也能连接机械臂，机械臂未连接时也能单独抓图。
@@ -245,7 +380,10 @@ flowchart TD
 
 | 层 | 本项目中的具体含义 | 不应该做什么 |
 | --- | --- | --- |
-| Parser | 把 JSON 字符串变成 `Command` | 不连接硬件，不判断真实路径 |
+| OpenAI-compatible Client | 同步调用 `/chat/completions` 并取出模型文本 | 不执行 Skill，不保存密钥 |
+| CommandGenerator | 用当前启用的 Skill 构造 Prompt，把模型 JSON 解析成 `Command` | 不判定轨迹安全，不直接调用 Adapter |
+| Parser | 把用户 JSON 或模型 JSON 变成 `Command` | 不连接硬件，不判断真实路径 |
+| ExecutionController | 在后台执行一个普通命令，并给 `stop` 保留独立入口 | 不同时并发多个普通动作 |
 | Skill Registry | 按名字找到 `SkillDefinition` | 不执行动作 |
 | Validator | 检查参数是否齐全、类型是否正确、有没有多余字段 | 不写电机 |
 | Safety Checker | 读取 `ParamSpec` 的上下限并检查数值 | 不为每个 Skill 写一堆硬编码分支 |
@@ -266,6 +404,8 @@ flowchart TD
 
 ## 4. 一条命令怎样执行
 
+### JSON 模式
+
 以 `move_arm` 为例：
 
 ```text
@@ -281,6 +421,30 @@ flowchart TD
 → adapter.move_to(x, y, z)
 → ExecutionResult
 ```
+
+### LLM 模式
+
+自然语言模式只在 JSON Parser 之前多了一段可替换的命令生成过程：
+
+```text
+“把夹爪移动到 x=0.35、y=0、z=0.22 米”
+→ build_command_prompt(user_input, runtime.skills)
+→ 只把 enabled=True 的 Skill 名称、描述和参数名告诉模型
+→ OpenAICompatibleClient.generate(prompt)
+→ 模型文本：{"skill_name":"move_arm","params":{"x":0.35,"y":0,"z":0.22}}
+→ parse_json_command()
+→ 与 JSON 模式完全相同的 Command 和后续执行链
+```
+
+这意味着模型不是 Gateway 的替代品。即使模型生成了不存在的 Skill、
+遗漏参数、增加额外参数、产生 `NaN`/越界坐标，或者在错误会话状态请求
+动作，现有 Registry、Validator、Safety Checker 和 SO-100 Plus Session
+仍会拒绝它。`disable_torque` 当前为禁用 Skill，因此不会进入模型可用
+Skill 列表。
+
+当前 Prompt 是单轮命令转换 Prompt，不保存多轮对话历史，也不接入 RAG、
+工具调用或视觉内容。服务端必须返回非流式 OpenAI-compatible 响应；客户端
+读取 `choices[0].message.content`，再交给现有 JSON Command Parser。
 
 Gateway 的失败顺序也很明确：
 
@@ -332,6 +496,27 @@ controller.submit(move_command)
 | `disable_torque` | `high` | 无 | `disable_torque()` | 默认禁用 |
 
 `disable_torque` 默认禁用的是 Gateway/普通命令入口，不是删除 Adapter 的卸力能力。受控维护流程仍可直接调用 Adapter；普通卸力必须先验证机械臂处于 `follower_rest`。
+
+真机运行时调用 `bind_so100_plus_arm_session()` 后，还会注册两个不接受
+用户路径参数的固定转换 Skill：
+
+| Skill | 风险等级 | 参数 | 固定路径 |
+| --- | --- | --- | --- |
+| `unfold_arm` | `high` | `{}` | `follower_rest → storage_escape → JoyCon 工作初始姿态` |
+| `fold_arm` | `high` | `{}` | 先回工作初始姿态，再经 `storage_escape → follower_rest` |
+
+它们的中间姿态、目标关节角、速度和安全限制不能通过 JSON 或自然语言
+覆盖。会话状态的放行规则是：
+
+| 会话状态 | 允许的运动相关 Skill |
+| --- | --- |
+| `REST` | `unfold_arm`、`stop` |
+| `TRANSITION` | 仅 `stop` |
+| `WORK` | `move_arm`、`fold_arm`、`open_gripper`、`close_gripper`、`stop` |
+| `UNVERIFIED` | 仅 `stop` 和安全退出；拒绝所有产生运动的 Skill |
+
+LLM 模式也使用同一份运行时 Skill Registry，所以状态门禁不会因输入方式
+改变。Prompt 中“出现了某个 Skill”也不等于该动作已经通过最终安全检查。
 
 复杂 Skill 应在 Handler 层组合原子动作。例如未来的 `pick` 可以是：
 
@@ -753,6 +938,11 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 `python -m pytest -q` 当前覆盖：
 
 - 命令数据对象与 JSON 解析；
+- OpenAI-compatible 请求格式、可选 Bearer Token 和标准响应解析；
+- LLM 的 HTTP、网络、超时、非法 JSON、缺失字段和空内容错误转换；
+- 环境变量读取、缺失配置在 Runtime 创建前失败，以及客户端依赖注入；
+- Fake LLM → CommandGenerator → Mock Runtime 的自然语言入口链路；
+- LLM 调用失败后继续接收输入，且 JSON 默认模式保持兼容；
 - Skill 查找、启用状态和参数结构校验；
 - 通用 Safety Checker；
 - Gateway 成功和失败分支；
@@ -782,6 +972,8 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 - 移动真实机械臂；
 - 修改校准或 PID EEPROM；
 - 打开 `/dev/video*`。
+- 发送真实 LLM HTTP 请求；
+- 读取或记录真实 API Key。
 
 ### 仿真与预览工具
 
@@ -875,7 +1067,7 @@ rosclaw-mini/
 │   ├── so100_plus_workspace/         # 全姿态仿真报告、点云和图片
 │   └── so100_plus_rest_workspace/    # 初始姿态附近网格结果；保留旧目录名
 ├── src/rosclaw_mini/
-│   ├── main.py                       # 默认 Mock JSON 入口
+│   ├── main.py                       # json/llm 输入与 mock/so100_plus 后端入口
 │   ├── runtime.py                    # Mock/真机 Adapter、Skills、Controller 装配与关闭
 │   ├── command_schema/               # Command / SafetyResult / ExecutionResult
 │   ├── execution/                    # 后台执行和 stop 调度
@@ -883,7 +1075,11 @@ rosclaw-mini/
 │   ├── skills/                       # Skill 定义、查找、校验和 Handler
 │   ├── safety/                       # Checker、工作空间、关节和运动限制
 │   ├── arm/                          # Mock、SO100Plus、Factory、运动学和诊断
-│   ├── llm/                          # 当前只有确定性解析器和占位代码
+│   ├── llm/                          # 通用客户端、Prompt、CommandGenerator 与解析
+│   │   ├── openai_compatible_client.py
+│   │   ├── command_generator.py
+│   │   ├── prompt_builder.py
+│   │   └── fake_client.py
 │   ├── rag/                          # 尚未接入
 │   ├── ros2/                         # 尚未接入
 │   ├── web/                          # 尚未接入
@@ -898,8 +1094,12 @@ rosclaw-mini/
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/rosclaw_mini/main.py` | 解析启动参数并运行 JSON 交互入口；默认 Mock |
+| `src/rosclaw_mini/main.py` | 选择 json/llm 输入和 mock/so100_plus 后端；LLM 配置先于 Runtime 校验 |
 | `src/rosclaw_mini/runtime.py` | 装配 Mock/真机 Adapter、Skills、Controller，并执行 stop→disconnect 关闭 |
+| `src/rosclaw_mini/llm/client.py` | 定义 `LLMClient.generate()` 协议和统一 `LLMClientError` |
+| `src/rosclaw_mini/llm/openai_compatible_client.py` | 用标准库同步调用 OpenAI-compatible `/chat/completions` |
+| `src/rosclaw_mini/llm/command_generator.py` | 组合 Prompt、调用客户端并复用现有 JSON Parser 生成 `Command` |
+| `src/rosclaw_mini/llm/prompt_builder.py` | 根据当前启用的 Skill 构造单轮命令转换 Prompt |
 | `src/rosclaw_mini/execution/controller.py` | 后台运行一个普通命令，并允许独立 stop 请求 |
 | `src/rosclaw_mini/gateway/command/gateway.py` | 编排 Skill 查找、校验、安全检查和执行 |
 | `src/rosclaw_mini/skills/arm_skills.py` | 定义机械臂 Skill、会话转换 Skill 和正式 right-follower 构造函数 |
@@ -948,21 +1148,30 @@ rosclaw-mini/
 - Python 和真机依赖未完整声明；
 - 当前真机工具仍依赖本地 Conda 环境和 `PYTHONPATH`；
 - 没有统一结构化运行日志、任务持久化和故障恢复；
-- LLM、RAG、Web、ROS 2 只是目标或目录占位，不是已完成功能。
+- OpenAI-compatible LLM 已接入正式 CLI，但当前仅支持同步、非流式、单轮
+  文本命令转换；没有对话记忆、自动重试、流式响应或工具调用；
+- LLM 服务配置目前只从环境变量读取，没有接入 `configs/*.yaml`；
+- 模型输出仍是不可信输入，准确率取决于模型和 Prompt；第一次联调必须
+  使用 Mock，并人工检查生成的 Command；
+- RAG、Web、ROS 2 仍未接入正式程序入口。
 
 ### 建议的下一步顺序
 
-1. 把串口、follower、校准和正式工作空间接入 `configs/*.yaml`，保留命令行覆盖；
-2. 补全可复现的 Python/Conda 安装说明和依赖声明；
-3. 在操作者在场、可立即断电的条件下，现场复验现有显式
+1. 先用 `--input-mode llm --backend mock` 完成第一次真实模型调用，核对
+   模型对 `move_arm`、夹爪、`stop`、`result` 和非法请求的表现；
+2. 把串口、follower、校准、正式工作空间和非敏感 LLM 配置接入
+   `configs/*.yaml`，保留环境变量和命令行覆盖；API Key 仍只走安全注入；
+3. 补全可复现的 Python/Conda 安装说明和依赖声明；
+4. 在操作者在场、可立即断电的条件下，现场复验现有显式
    `REST → unfold_arm → WORK → fold_arm → REST`，重点核对当次
    follower_rest 展开、任意已认证 WORK 点返回初始点和反向收纳；
-4. 单独完成真实摄像头一帧验证，不要求机械臂同时连接；
-5. 增加统一结构化遥测日志和运行报告；
-6. 根据实际工位增加底座、桌面、线缆和障碍物模型；
-7. 在底层真机入口稳定后，再接入复杂 Skill、Web、ROS 2、LLM 或 RAG。
+5. 单独完成真实摄像头一帧验证，不要求机械臂同时连接；
+6. 增加统一结构化遥测日志和运行报告；
+7. 根据实际工位增加底座、桌面、线缆和障碍物模型；
+8. 在输入和底层真机入口都稳定后，再接入复杂 Skill、RAG、Web 或 ROS 2。
 
-这里的优先级是先把“现有真机能力变成可重复配置和启动的应用”，再扩展智能化功能。
+这里的优先级是先在 Mock 上验证模型生成结果，再把已经完成的真机能力
+变成可重复配置和启动的应用，最后扩展更多智能化功能。
 
 ## 15. 延伸文档
 
