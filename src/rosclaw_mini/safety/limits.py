@@ -271,6 +271,11 @@ def resolve_relative_tcp_target(
         label="相对位移",
         error_type=LimitViolationError,
     )
+    if all(value == 0.0 for value in displacement):
+        raise LimitViolationError(
+            "相对位移 dx/dy/dz 不能全部为 0；"
+            "未向机械臂发送运动。"
+        )
     target = tuple(
         current_value + delta
         for current_value, delta in zip(

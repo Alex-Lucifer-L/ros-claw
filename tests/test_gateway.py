@@ -199,6 +199,35 @@ def test_move_relative_rejects_final_target_before_adapter_motion():
     assert "超出允许范围" in result.message
 
 
+def test_move_relative_zero_displacement_is_rejected_before_adapter_motion():
+    class CountingMockArmAdapter(MockArmAdapter):
+        def __init__(self):
+            super().__init__()
+            self.move_calls = 0
+
+        def move_to(self, x, y, z):
+            self.move_calls += 1
+            super().move_to(x, y, z)
+
+    relative_adapter = CountingMockArmAdapter()
+    relative_adapter.position = (0.35, -0.01, 0.24)
+    relative_skills = build_so100_plus_right_follower_arm_skills(
+        relative_adapter
+    )
+
+    result = run_command(
+        make_command(
+            "move_relative",
+            {"dx": 0.0, "dy": 0.0, "dz": 0.0},
+        ),
+        relative_skills,
+    )
+
+    assert result.success is False
+    assert relative_adapter.move_calls == 0
+    assert "dx/dy/dz 不能全部为 0" in result.message
+
+
 def test_mock_consecutive_relative_moves_use_previous_completed_position():
     relative_adapter = MockArmAdapter()
     relative_skills = build_arm_skills(

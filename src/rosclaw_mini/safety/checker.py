@@ -88,6 +88,11 @@ def check_command(command: Command, skill: SkillDefinition) -> SafetyResult:
                     f"maximum allowed value {param_spec.max_value}",
                 )
 
+    if skill.skill_name == "move_relative" and all(
+        params.get(name) == 0.0 for name in ("dx", "dy", "dz")
+    ):
+        return _unsafe(command, "相对位移 dx/dy/dz 不能全部为 0")
+
     return SafetyResult(
         command_id=command.command_id,
         is_safe=True,

@@ -156,6 +156,18 @@ def test_move_relative_rejects_non_finite_displacement(invalid_value):
     assert "有限数值" in result.reason
 
 
+def test_move_relative_rejects_zero_displacement():
+    command = make_command(
+        "move_relative",
+        {"dx": 0.0, "dy": 0.0, "dz": 0.0},
+    )
+
+    result = check_command(command, skills["move_relative"])
+
+    assert result.is_safe is False
+    assert "dx/dy/dz 不能全部为 0" in result.reason
+
+
 def test_accept_skill_without_parameters():
     command = make_command("open_gripper", {})
     skill = skills["open_gripper"]

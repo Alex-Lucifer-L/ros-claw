@@ -57,6 +57,14 @@ class ArmSessionState(str, Enum):
     UNVERIFIED = "UNVERIFIED"
 
 
+class _WorkMotionExecutionError(RuntimeError):
+    """工作区执行失败，同时保留是否已写入轨迹的事实。"""
+
+    def __init__(self, message: str, *, motion_started: bool) -> None:
+        super().__init__(message)
+        self.motion_started = motion_started
+
+
 @dataclass(frozen=True)
 class SO100PlusPoseSnapshot:
     """一次由真实 follower 反馈和 FK 得到的姿态快照。"""
@@ -83,6 +91,9 @@ class SO100PlusSessionAdapter(Protocol):
     """会话所需的现有 Adapter 原子操作子集。"""
 
     def move_to(self, x: float, y: float, z: float) -> None: ...
+
+    @property
+    def motion_waypoint_written(self) -> bool: ...
 
     def plan_move_to(
         self,
@@ -744,8 +755,30 @@ class SO100PlusArmSession:
             for verified_plan in verified.plans:
                 self._work_adapter.execute_joint_plan(verified_plan)
         except Exception as error:
-            raise RuntimeError(f"工作区已验证轨迹执行失败：{error}") from error
+            raise _WorkMotionExecutionError(
+                f"工作区已验证轨迹执行失败：{error}",
+                motion_started=(
+                    self._work_adapter.motion_waypoint_written
+                ),
+            ) from error
         return target
+
+    def _work_motion_failure(
+        self,
+        command: Command,
+        error: Exception,
+    ) -> ExecutionResult:
+        message = f"{command.skill_name} 工作区运动阶段失败：{error}"
+        if (
+            isinstance(error, _WorkMotionExecutionError)
+            and error.motion_started
+        ):
+            message += (
+                "；轨迹已向电机写入，当前姿态不再可认证，"
+                "会话已标记为 UNVERIFIED。"
+            )
+            self._set_state(ArmSessionState.UNVERIFIED, message)
+        return self._failure(command, message)
 
     def move_arm(self, command: Command) -> ExecutionResult:
         rejected = self._require_state(command, ArmSessionState.WORK)
@@ -763,10 +796,7 @@ class SO100PlusArmSession:
                 current_snapshot,
             )
         except Exception as error:
-            return self._failure(
-                command,
-                f"move_arm 工作区运动阶段失败：{error}",
-            )
+            return self._work_motion_failure(command, error)
         finally:
             self._deactivate(self._work_adapter)
         return self._success(command, "夹爪 TCP 已完成工作区移动")
@@ -790,10 +820,7 @@ class SO100PlusArmSession:
             )
             self._execute_work_target(target, current_snapshot)
         except Exception as error:
-            return self._failure(
-                command,
-                f"move_relative 工作区运动阶段失败：{error}",
-            )
+            return self._work_motion_failure(command, error)
         finally:
             self._deactivate(self._work_adapter)
         return self._success(

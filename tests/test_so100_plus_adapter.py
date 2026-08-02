@@ -880,7 +880,7 @@ def test_saved_real_hardware_profile_is_the_runtime_default():
     assert motion_config.critical_temperature_celsius == 70.0
     assert motion_config.temperature_confirmation_samples == 2
     assert motion_config.stream_frequency_hz == 30.0
-    assert motion_config.stream_max_joint_speed_degrees_per_second == 20.0
+    assert motion_config.stream_max_joint_speed_degrees_per_second == 12.0
     assert motion_config.stream_tracking_error_limit_degrees == 5.0
 
 
@@ -1073,24 +1073,30 @@ def test_move_to_executes_planned_waypoint_and_preserves_gripper():
 
     adapter.move_to(0.3, 0.0, 0.2)
 
-    assert goal_write_calls(robot) == [
-        (
-            "Goal_Position",
-            [10.5, 20.5, 30.5, 40.5, 50.5, 60.5, -5.0],
-            None,
-        ),
-        (
-            "Goal_Position",
-            [11.0, 21.0, 31.0, 41.0, 51.0, 61.0, -5.0],
-            None,
-        )
-    ]
+    writes = goal_write_calls(robot)
+    assert len(writes) == 3
+    expected_arm_positions = (
+        (10.25, 20.25, 30.25, 40.25, 50.25, 60.25),
+        (10.75, 20.75, 30.75, 40.75, 50.75, 60.75),
+        (11.0, 21.0, 31.0, 41.0, 51.0, 61.0),
+    )
+    for write, expected_arm in zip(
+        writes,
+        expected_arm_positions,
+        strict=True,
+    ):
+        assert write[0] == "Goal_Position"
+        assert write[1][:6] == pytest.approx(expected_arm)
+        assert write[1][-1] == -5.0
+        assert write[2] is None
     assert adapter.last_motion_plan is not kinematics.plan
     assert adapter.last_motion_plan.is_final_execution_plan is True
     assert adapter.last_motion_plan.target_joint_radians == (
         kinematics.plan.target_joint_radians
     )
-    assert waits == pytest.approx([1 / 30, 1 / 30, 0.25, 0.25, 0.25])
+    assert waits == pytest.approx(
+        [1 / 30, 1 / 30, 1 / 30, 0.25, 0.25, 0.25]
+    )
     assert adapter.last_settle_report is not None
     assert adapter.last_settle_report.duration_seconds == pytest.approx(0.75)
     assert len(adapter.last_settle_report.position_samples_degrees) == 4
@@ -1118,7 +1124,7 @@ def test_move_joints_executes_checked_joint_plan_and_preserves_gripper():
         )
     ]
     writes = goal_write_calls(robot)
-    assert len(writes) == 2
+    assert len(writes) == len(adapter.last_motion_plan.waypoints_radians)
     assert writes[-1] == (
         "Goal_Position",
         [11.0, 21.0, 31.0, 41.0, 51.0, 61.0, -5.0],
@@ -1261,6 +1267,33 @@ def test_streaming_motor_targets_exactly_match_final_prechecked_waypoints():
             pytest.approx(validated_waypoint)
         )
         assert driver_targets[-1] == -5.0
+
+
+def test_saved_stream_speed_materializes_slower_30hz_execution_plan():
+    robot = FakeRobot()
+    kinematics = FakeMotionKinematics()
+    target = tuple(
+        value + math.radians(4.0)
+        for value in kinematics.current_model_radians
+    )
+    raw_plan = JointMotionPlan(
+        target_position_m=kinematics.plan.target_position_m,
+        current_joint_radians=kinematics.current_model_radians,
+        target_joint_radians=target,
+        waypoints_radians=(target,),
+    )
+    adapter = make_adapter(
+        robot,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(),
+    )
+
+    final_plan = adapter.materialize_joint_plan(raw_plan)
+
+    assert final_plan.waypoint_interval_seconds == pytest.approx(1 / 30)
+    assert len(final_plan.waypoints_radians) == 16
+    assert final_plan.waypoints_radians[-1] == pytest.approx(target)
 
 
 def test_stop_between_registration_and_first_motor_write_is_not_lost():
@@ -1450,7 +1483,7 @@ def test_move_to_holds_position_when_load_stays_at_limit():
         adapter.move_to(0.3, 0.0, 0.2)
 
     writes = goal_write_calls(robot)
-    assert len(writes) == 3
+    assert len(writes) == len(adapter.last_motion_plan.waypoints_radians) + 1
     assert writes[-1][1] == pytest.approx(
         [13.0, 23.0, 33.0, 43.0, 53.0, 63.0, -5.0]
     )
@@ -1559,7 +1592,7 @@ def test_move_to_holds_position_at_absolute_temperature_limit():
         adapter.move_to(0.3, 0.0, 0.2)
 
     writes = goal_write_calls(robot)
-    assert len(writes) == 3
+    assert len(writes) == len(adapter.last_motion_plan.waypoints_radians) + 1
     assert writes[-1][1] == pytest.approx(
         [13.0, 23.0, 33.0, 43.0, 53.0, 63.0, -5.0]
     )
@@ -1613,7 +1646,9 @@ def test_move_to_holds_position_when_cartesian_error_exceeds_twelve_mm():
     ):
         adapter.move_to(0.3, 0.0, 0.2)
 
-    assert len(goal_write_calls(robot)) == 3
+    assert len(goal_write_calls(robot)) == (
+        len(adapter.last_motion_plan.waypoints_radians) + 1
+    )
 
 
 def test_stop_cancels_arm_motion_and_holds_all_joints():

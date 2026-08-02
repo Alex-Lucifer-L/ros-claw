@@ -98,7 +98,10 @@ class SO100PlusRealHardwareProfile:
     critical_temperature_celsius: float = 70.0
     temperature_confirmation_samples: int = 2
     stream_frequency_hz: float = 30.0
-    stream_max_joint_speed_degrees_per_second: float = 20.0
+    # 2026-08-02 首次 LLM 相对运动真机记录在 20°/s 时，
+    # shoulder_pitch 的跟踪滞后两次超过 5°保护线。保持
+    # 30 Hz 和 5°保护不变，将计划推进速度降为 12°/s。
+    stream_max_joint_speed_degrees_per_second: float = 12.0
     stream_tracking_error_limit_degrees: float = 5.0
     stream_telemetry_interval_seconds: float = 0.25
 
@@ -417,6 +420,13 @@ class SO100PlusAdapter(ArmAdapter):
     @property
     def last_settle_report(self) -> SO100PlusSettleReport | None:
         return self._last_settle_report
+
+    @property
+    def motion_waypoint_written(self) -> bool:
+        """当前注册动作是否已向电机写过轨迹目标。"""
+
+        with self._action_state_lock:
+            return self._motion_waypoint_written
 
     @property
     def camera_names(self) -> tuple[str, ...]:

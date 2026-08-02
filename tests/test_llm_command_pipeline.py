@@ -1,4 +1,5 @@
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
+from rosclaw_mini.gateway.command.gateway import run_command
 from rosclaw_mini.llm.command_generator import CommandGenerator
 from rosclaw_mini.llm.client import LLMClientError
 from rosclaw_mini.llm.fake_client import FakeLLMClient
@@ -110,15 +111,20 @@ def test_prompt_distinguishes_absolute_and_relative_motion() -> None:
     )
 
     assert "move_arm" in prompt
-    assert "移动到 x/y/z" in prompt
-    assert "基座坐标系绝对位置" in prompt
+    assert "绝对目标" in prompt
+    assert "基座系 x/y/z 目标" in prompt
     assert "move_relative" in prompt
     assert "参数：dx, dy, dz" in prompt
     assert "向上移动2厘米" in prompt
-    assert "厘米必须除以 100 换算成米" in prompt
-    assert "dz=0.02" in prompt
+    assert "1厘米=0.01米" in prompt
+    assert '"dz":0.03' in prompt
     assert "不得猜测当前 TCP" in prompt
-    assert "未定义方向" in prompt
+    assert "+X=向前/伸出/远离底座" in prompt
+    assert "向左=+Y，向右=-Y" in prompt
+    assert "明确轴方向优先" in prompt
+    assert "向右移动3cm" in prompt
+    assert '"dy":-0.03' in prompt
+    assert "unsupported_action" in prompt
 
     runtime.shutdown()
 
@@ -140,6 +146,85 @@ def test_fake_llm_generates_two_centimeter_upward_relative_command() -> None:
     assert command.skill_name == "move_relative"
     assert command.params == {"dx": 0.0, "dy": 0.0, "dz": 0.02}
 
+    runtime.shutdown()
+
+
+def test_generator_sends_directional_language_to_llm_with_semantic_context(
+) -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+
+    class RecordingClient:
+        prompt: str | None = None
+
+        def generate(self, prompt: str) -> str:
+            self.prompt = prompt
+            return (
+                '{"skill_name":"move_relative",'
+                '"params":{"dx":0.0,"dy":-0.03,"dz":0.0}}'
+            )
+
+    client = RecordingClient()
+    generator = CommandGenerator(client=client, skills=runtime.skills)
+    command = generator.generate("请把夹爪向右边移动3厘米")
+
+    assert client.prompt is not None
+    assert "请把夹爪向右边移动3厘米" in client.prompt
+    assert "向左=+Y，向右=-Y" in client.prompt
+    assert command.skill_name == "move_relative"
+    assert command.params == {"dx": 0.0, "dy": -0.03, "dz": 0.0}
+
+    runtime.shutdown()
+
+
+def test_missing_distance_stays_in_existing_validator_flow() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response='{"skill_name":"move_relative","params":{}}'
+        ),
+        skills=runtime.skills,
+    )
+
+    command = generator.generate("向右")
+    result = run_command(command, runtime.skills)
+
+    assert command.skill_name == "move_relative"
+    assert result.success is False
+    assert result.message == "缺少必需参数: dx"
+
+    runtime.shutdown()
+
+
+def test_unsupported_semantics_stay_in_existing_gateway_flow() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response='{"skill_name":"unsupported_action","params":{}}'
+        ),
+        skills=runtime.skills,
+    )
+
+    command = generator.generate("向左转3度")
+    result = run_command(command, runtime.skills)
+
+    assert result.success is False
+    assert result.message == "技能不存在: unsupported_action"
+
+    runtime.shutdown()
+
+
+def test_generator_accepts_explicit_stop_intent() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response='{"skill_name":"stop","params":{}}'
+        ),
+        skills=runtime.skills,
+    )
+
+    command = generator.generate("请停止机械臂")
+
+    assert command.skill_name == "stop"
     runtime.shutdown()
 
 

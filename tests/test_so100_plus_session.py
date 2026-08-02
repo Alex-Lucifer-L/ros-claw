@@ -114,11 +114,13 @@ class RecordingSessionAdapter:
         self.operation_started = Event()
         self.release_operation = Event()
         self.action_active = False
+        self.motion_waypoint_written = False
         self.materialized_plans = []
 
     def begin_motion_action(self) -> None:
         if self.action_active:
             raise RuntimeError("测试动作重复注册")
+        self.motion_waypoint_written = False
         self.action_active = True
 
     def end_motion_action(self) -> None:
@@ -164,6 +166,7 @@ class RecordingSessionAdapter:
         self._record("move_joints", tuple(joint_radians))
 
     def execute_joint_plan(self, plan) -> None:
+        self.motion_waypoint_written = True
         self._record("execute_joint_plan", plan)
 
     def open_gripper(self) -> None:
@@ -930,6 +933,31 @@ def test_move_relative_rejects_workspace_target_before_plan_or_motion():
     assert "超出允许范围" in result.message
 
 
+def test_move_relative_zero_displacement_fails_before_plan_or_motion():
+    kinematics = LinearFakeKinematics()
+    work = RecordingSessionAdapter()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        replace(
+            _work_snapshot(kinematics),
+            tcp_position_m=(0.35, -0.01, 0.24),
+        ),
+        work_adapter=work,
+    )
+
+    result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.0, "dy": 0.0, "dz": 0.0},
+        )
+    )
+
+    assert result.success is False
+    assert session.state is ArmSessionState.WORK
+    assert work.calls == []
+    assert "dx/dy/dz 不能全部为 0" in result.message
+
+
 def test_move_relative_collision_precheck_prevents_execution():
     kinematics = LinearFakeKinematics()
     work = RecordingSessionAdapter()
@@ -956,9 +984,76 @@ def test_move_relative_collision_precheck_prevents_execution():
     )
 
     assert result.success is False
+    assert session.state is ArmSessionState.WORK
     assert "工作区完整轨迹 MuJoCo 预检查失败" in result.message
     assert "模拟工作区路径碰撞" in result.message
     assert [call[0] for call in work.calls] == ["plan_move_to"]
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "params"),
+    (
+        ("move_arm", {"x": 0.36, "y": -0.01, "z": 0.25}),
+        ("move_relative", {"dx": 0.01, "dy": 0.0, "dz": 0.0}),
+    ),
+)
+def test_work_motion_failure_after_motor_write_marks_unverified(
+    skill_name,
+    params,
+):
+    class FailingAfterWriteAdapter(RecordingSessionAdapter):
+        def execute_joint_plan(self, plan) -> None:
+            self.motion_waypoint_written = True
+            self._record("execute_joint_plan", plan)
+            raise RuntimeError("模拟已写入后跟踪失败")
+
+    kinematics = LinearFakeKinematics()
+    work = FailingAfterWriteAdapter()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        replace(
+            _work_snapshot(kinematics),
+            tcp_position_m=(0.35, -0.01, 0.24),
+        ),
+        work_adapter=work,
+    )
+
+    result = getattr(session, skill_name)(_command(skill_name, params))
+
+    assert result.success is False
+    assert session.state is ArmSessionState.UNVERIFIED
+    assert "模拟已写入后跟踪失败" in result.message
+    assert "会话已标记为 UNVERIFIED" in result.message
+
+
+def test_work_execution_failure_before_first_write_preserves_work_state():
+    class FailingBeforeWriteAdapter(RecordingSessionAdapter):
+        def execute_joint_plan(self, plan) -> None:
+            self._record("execute_joint_plan", plan)
+            raise RuntimeError("模拟首条写入前起点门禁失败")
+
+    kinematics = LinearFakeKinematics()
+    work = FailingBeforeWriteAdapter()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        replace(
+            _work_snapshot(kinematics),
+            tcp_position_m=(0.35, -0.01, 0.24),
+        ),
+        work_adapter=work,
+    )
+
+    result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.01, "dy": 0.0, "dz": 0.0},
+        )
+    )
+
+    assert result.success is False
+    assert session.state is ArmSessionState.WORK
+    assert "模拟首条写入前起点门禁失败" in result.message
+    assert "UNVERIFIED" not in result.message
 
 
 def test_move_arm_keeps_absolute_target_semantics_with_shared_work_path():
