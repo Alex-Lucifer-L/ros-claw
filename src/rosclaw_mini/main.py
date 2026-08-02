@@ -5,7 +5,8 @@ from collections.abc import Callable, Sequence
 import json
 from pathlib import Path
 import uuid
-
+from rosclaw_mini.command_schema.commands import Command
+from rosclaw_mini.llm.command_generator import CommandGenerator
 from rosclaw_mini.arm.so100_plus_factory import SO100PlusRobotConfig
 from rosclaw_mini.llm.command_parser import parse_json_command
 from rosclaw_mini.runtime import (
@@ -73,6 +74,28 @@ def build_runtime_from_args(args: argparse.Namespace) -> ArmRuntime:
         risk_acknowledged=args.acknowledge_so100_plus_risk,
     )
 
+def dispatch_command(
+    runtime: ArmRuntime,
+    command: Command,
+) -> str:
+    """把已经生成的 Command 提交给现有执行链。"""
+
+    if command.skill_name == "stop":
+        stop_result = runtime.controller.request_stop(command)
+        return f"停止命令执行结果: {stop_result}"
+
+    accepted = runtime.controller.submit(command)
+
+    if accepted:
+        return (
+            f"命令 {command.command_id} 已提交，"
+            "正在后台执行。"
+        )
+
+    return (
+        "当前有命令正在执行，"
+        "请等待其完成或使用 stop 命令停止它。"
+    )
 
 def run_json_command_loop(
     runtime: ArmRuntime,
@@ -115,18 +138,53 @@ def run_json_command_loop(
             output_func("JSON 合法，但 Command 数据结构不合法")
             continue
 
-        if command.skill_name == "stop":
-            stop_result = runtime.controller.request_stop(command)
-            output_func(f"停止命令执行结果: {stop_result}")
+        output_func(dispatch_command(runtime, command))
+
+def run_llm_command_loop(
+    runtime: ArmRuntime,
+    generator: CommandGenerator,
+    *,
+    input_func: InputFunction = input,
+    output_func: OutputFunction = print,
+) -> None:
+    """读取自然语言，通过 LLM 生成 Command 后进入现有执行链。"""
+
+    while True:
+        try:
+            user_input = input_func("请输入自然语言指令：")
+        except EOFError:
+            output_func("输入已结束，准备退出程序。")
+            return
+
+        user_input = user_input.strip()
+
+        if user_input == "exit":
+            output_func("准备退出程序。")
+            return
+
+        if user_input == "result":
+            if runtime.controller.is_running():
+                output_func("命令正在执行中，请等待其完成。")
+            else:
+                result = runtime.controller.last_result()
+
+                if result is None:
+                    output_func("没有上一次命令的执行结果。")
+                else:
+                    output_func(f"上一次命令执行结果: {result}")
+
             continue
 
-        accepted = runtime.controller.submit(command)
-        if accepted:
-            output_func(f"命令 {command_id} 已提交，正在后台执行。")
-        else:
-            output_func(
-                "当前有命令正在执行，请等待其完成或使用 stop 命令停止它。"
-            )
+        try:
+            command = generator.generate(user_input)
+        except json.JSONDecodeError:
+            output_func("模型返回的内容不是合法 JSON")
+            continue
+        except ValueError as error:
+            output_func(f"模型生成的 Command 不合法: {error}")
+            continue
+
+        output_func(dispatch_command(runtime, command))
 
 
 def main(

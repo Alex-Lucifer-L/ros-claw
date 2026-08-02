@@ -1,3 +1,5 @@
+###此文件定义了命令生成器，用于根据用户输入生成相应的命令。
+
 from uuid import uuid4
 
 from rosclaw_mini.command_schema.commands import Command
