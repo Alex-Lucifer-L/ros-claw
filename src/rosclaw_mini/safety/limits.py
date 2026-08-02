@@ -252,6 +252,44 @@ class MotionLimits:
         return self.joints.validate_step(current_radians, target_radians)
 
 
+def resolve_relative_tcp_target(
+    current_position_m: Sequence[float],
+    displacement_m: Sequence[float],
+    workspace: WorkspaceLimits,
+) -> tuple[float, float, float]:
+    """将执行时 TCP 与基座系位移合成绝对目标，并验证最终工作空间。"""
+
+    current = _finite_vector(
+        current_position_m,
+        expected_length=3,
+        label="当前 TCP",
+        error_type=LimitViolationError,
+    )
+    displacement = _finite_vector(
+        displacement_m,
+        expected_length=3,
+        label="相对位移",
+        error_type=LimitViolationError,
+    )
+    target = tuple(
+        current_value + delta
+        for current_value, delta in zip(
+            current,
+            displacement,
+            strict=True,
+        )
+    )
+    try:
+        return workspace.validate_position(*target)
+    except LimitViolationError as error:
+        raise LimitViolationError(
+            "相对移动最终目标违反工作空间："
+            f"当前 TCP={current} m；"
+            f"请求位移 dx/dy/dz={displacement} m；"
+            f"最终目标={target} m；{error}"
+        ) from error
+
+
 # 以下数值逐字来自 lerobot-kinematics-plus 的 SO-100 Plus 模型。
 # 它们只描述第三方运动学模型，不是 right_follower 实机认证的物理安全范围。
 SO100_PLUS_ARM_JOINT_NAMES = (

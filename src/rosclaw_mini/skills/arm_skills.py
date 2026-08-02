@@ -23,6 +23,15 @@ def _position_param_spec(axis: AxisLimits | None) -> ParamSpec:
     )
 
 
+def _displacement_param_spec() -> ParamSpec:
+    """相对位移只在此检查类型/有限性；最终绝对目标再检查工作空间。"""
+
+    return ParamSpec(
+        accepted_types=(int, float),
+        required=True,
+    )
+
+
 def build_arm_skills(
     adapter: ArmAdapter,
     workspace_limits: WorkspaceLimits | None = None,
@@ -33,7 +42,7 @@ def build_arm_skills(
     每个技能定义包括技能名称、描述、风险等级、是否启用、参数规范以及对应的处理函数。
 
     """
-    arm_handlers = ArmHandlers(adapter)
+    arm_handlers = ArmHandlers(adapter, workspace_limits=workspace_limits)
 
     move_arm_skill = SkillDefinition(
         skill_name="move_arm",
@@ -53,6 +62,22 @@ def build_arm_skills(
             ),
         },
         handler=arm_handlers.move_arm,  # 这里可以指定一个处理函数来执行移动机械臂的操作
+    )
+
+    move_relative_skill = SkillDefinition(
+        skill_name="move_relative",
+        description=(
+            "以命令执行时的当前夹爪 TCP 为起点，按基座坐标系"
+            "相对移动 dx/dy/dz 米"
+        ),
+        risk_level="medium",
+        enabled=workspace_limits is not None,
+        params_schema={
+            "dx": _displacement_param_spec(),
+            "dy": _displacement_param_spec(),
+            "dz": _displacement_param_spec(),
+        },
+        handler=arm_handlers.move_relative,
     )
 
     open_gripper_skill = SkillDefinition(
@@ -93,6 +118,7 @@ def build_arm_skills(
 
     return {
         "move_arm": move_arm_skill,
+        "move_relative": move_relative_skill,
         "open_gripper": open_gripper_skill,
         "close_gripper": close_gripper_skill,
         "stop": stop_skill,
@@ -122,7 +148,13 @@ def bind_so100_plus_arm_session(
 ) -> dict[str, SkillDefinition]:
     """把动态会话门禁绑定到现有 right_follower Skill 注册表。"""
 
-    required = ("move_arm", "open_gripper", "close_gripper", "stop")
+    required = (
+        "move_arm",
+        "move_relative",
+        "open_gripper",
+        "close_gripper",
+        "stop",
+    )
     missing = tuple(name for name in required if name not in skills)
     if missing:
         raise RuntimeError(
@@ -134,6 +166,10 @@ def bind_so100_plus_arm_session(
     skills["move_arm"] = replace(
         skills["move_arm"],
         handler=session.move_arm,
+    )
+    skills["move_relative"] = replace(
+        skills["move_relative"],
+        handler=session.move_relative,
     )
     skills["open_gripper"] = replace(
         skills["open_gripper"],

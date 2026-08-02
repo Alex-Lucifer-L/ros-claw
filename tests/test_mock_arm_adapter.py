@@ -1,3 +1,5 @@
+import pytest
+
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 
 
@@ -20,6 +22,17 @@ def test_mock_adapter_move_to():
 
     assert adapter.position == (0.5, 0.4, 0.3)
     assert adapter.is_stopped is False
+
+
+def test_mock_adapter_reads_saved_tcp_position():
+    adapter = MockArmAdapter()
+
+    with pytest.raises(RuntimeError, match="尚无当前 TCP"):
+        adapter.read_tcp_position()
+
+    adapter.move_to(0.35, -0.01, 0.24)
+
+    assert adapter.read_tcp_position() == (0.35, -0.01, 0.24)
 
 
 def test_mock_adapter_gripper_operations():

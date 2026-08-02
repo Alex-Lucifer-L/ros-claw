@@ -60,6 +60,20 @@ def make_stop_command(command_id: str) -> Command:
     )
 
 
+def make_relative_command(
+    command_id: str,
+    dx: float = 0.0,
+    dy: float = 0.0,
+    dz: float = 0.02,
+) -> Command:
+    return Command(
+        command_id=command_id,
+        skill_name="move_relative",
+        params={"dx": dx, "dy": dy, "dz": dz},
+        source="user",
+    )
+
+
 def test_move_completes_normally_without_stop():
     """
     没有发送 stop 时，运动应该正常完成。
@@ -119,6 +133,25 @@ def test_stop_interrupts_running_move():
 
     assert controller.is_running() is False
     assert controller.last_result() == move_result
+
+
+def test_stop_interrupts_relative_move_through_existing_controller_path():
+    adapter, controller = build_test_system(move_duration_seconds=2.0)
+    adapter.position = (0.35, -0.01, 0.24)
+
+    assert controller.submit(make_relative_command("relative-stop")) is True
+    assert adapter.wait_until_moving(timeout=0.5) is True
+
+    stop_result = controller.request_stop(make_stop_command("stop-relative"))
+    move_result = controller.wait(timeout=0.5)
+
+    assert stop_result.success is True
+    assert move_result is not None
+    assert move_result.success is False
+    assert move_result.skill_name == "move_relative"
+    assert "停止" in move_result.message
+    assert adapter.position == (0.35, -0.01, 0.24)
+    assert adapter.is_stopped is True
 
 
 def test_next_move_succeeds_after_interrupted_move():

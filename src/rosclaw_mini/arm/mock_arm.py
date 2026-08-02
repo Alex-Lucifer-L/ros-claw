@@ -92,6 +92,17 @@ class MockArmAdapter(ArmAdapter):
                 self._is_moving = False
                 self._move_started_event.clear()
 
+    def read_tcp_position(self) -> tuple[float, float, float]:
+        """返回 Mock 当前保存的 TCP；尚无绝对位置时失败关闭。"""
+
+        with self._state_lock:
+            position = self.position
+        if position is None:
+            raise RuntimeError(
+                "MockArm 尚无当前 TCP；请先执行一次绝对 move_arm。"
+            )
+        return position
+
     def open_gripper(self) -> None:
         # 模拟打开夹爪。
         self.gripper_is_open = True

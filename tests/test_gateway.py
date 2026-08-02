@@ -1,9 +1,15 @@
 from dataclasses import replace
 
+import pytest
+
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.gateway.command.gateway import run_command
-from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
+from rosclaw_mini.safety.limits import (
+    SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+    AxisLimits,
+    WorkspaceLimits,
+)
 from rosclaw_mini.skills.arm_skills import (
     build_arm_skills,
     build_so100_plus_right_follower_arm_skills,
@@ -155,6 +161,82 @@ def test_work_initial_and_transition_envelope_cannot_bypass_move_workspace():
     assert right_adapter.position is None
 
 
+def test_move_relative_rejects_final_target_before_adapter_motion():
+    class CountingMockArmAdapter(MockArmAdapter):
+        def __init__(self):
+            super().__init__()
+            self.move_calls = 0
+
+        def move_to(self, x, y, z):
+            self.move_calls += 1
+            super().move_to(x, y, z)
+
+    workspace = SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
+    relative_adapter = CountingMockArmAdapter()
+    relative_adapter.position = (
+        workspace.x.maximum - 0.001,
+        0.0,
+        0.22,
+    )
+    right_skills = build_so100_plus_right_follower_arm_skills(
+        relative_adapter
+    )
+
+    result = run_command(
+        make_command(
+            "move_relative",
+            {"dx": 0.01, "dy": 0.0, "dz": 0.0},
+        ),
+        right_skills,
+    )
+
+    assert result.success is False
+    assert relative_adapter.move_calls == 0
+    assert "当前 TCP=" in result.message
+    assert "请求位移 dx/dy/dz=" in result.message
+    assert "最终目标=" in result.message
+    assert "x=" in result.message
+    assert "超出允许范围" in result.message
+
+
+def test_mock_consecutive_relative_moves_use_previous_completed_position():
+    relative_adapter = MockArmAdapter()
+    relative_skills = build_arm_skills(
+        relative_adapter,
+        workspace_limits=WorkspaceLimits(
+            x=AxisLimits(-1.0, 1.0),
+            y=AxisLimits(-1.0, 1.0),
+            z=AxisLimits(-1.0, 1.0),
+        ),
+    )
+    absolute_result = run_command(
+        make_command(
+            "move_arm",
+            {"x": 0.35, "y": -0.01, "z": 0.24},
+        ),
+        relative_skills,
+    )
+    first = run_command(
+        make_command(
+            "move_relative",
+            {"dx": 0.0, "dy": 0.0, "dz": 0.02},
+        ),
+        relative_skills,
+    )
+    second = run_command(
+        make_command(
+            "move_relative",
+            {"dx": 0.01, "dy": 0.0, "dz": 0.0},
+        ),
+        relative_skills,
+    )
+
+    assert absolute_result.success is True
+    assert first.success is True
+    assert second.success is True
+    assert relative_adapter.position == pytest.approx((0.36, -0.01, 0.26))
+
+
 def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
     class StubSession:
         def __init__(self):
@@ -170,6 +252,7 @@ def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
             )
 
         move_arm = _handle
+        move_relative = _handle
         open_gripper = _handle
         close_gripper = _handle
         stop = _handle

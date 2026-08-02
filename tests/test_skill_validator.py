@@ -1,3 +1,5 @@
+import pytest
+
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.safety.limits import AxisLimits, WorkspaceLimits
 from rosclaw_mini.skills.arm_skills import build_arm_skills
@@ -94,3 +96,28 @@ def test_validate_gripper_params():
 
     assert invalid_result is False
     assert invalid_message == "不允许额外参数: force"
+
+
+@pytest.mark.parametrize("missing_name", ("dx", "dy", "dz"))
+def test_move_relative_rejects_each_missing_displacement(missing_name):
+    params = {"dx": 0.0, "dy": 0.0, "dz": 0.02}
+    del params[missing_name]
+
+    is_valid, message = validate_skill_params(
+        skills["move_relative"],
+        params,
+    )
+
+    assert is_valid is False
+    assert message == f"缺少必需参数: {missing_name}"
+
+
+@pytest.mark.parametrize("invalid_value", ("0.02", True))
+def test_move_relative_rejects_non_numeric_displacement(invalid_value):
+    is_valid, message = validate_skill_params(
+        skills["move_relative"],
+        {"dx": 0.0, "dy": 0.0, "dz": invalid_value},
+    )
+
+    assert is_valid is False
+    assert "参数 dz 的类型不正确" in message

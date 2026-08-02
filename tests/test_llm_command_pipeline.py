@@ -101,6 +101,48 @@ def test_llm_command_runs_through_existing_execution_chain() -> None:
     runtime.shutdown()
 
 
+def test_prompt_distinguishes_absolute_and_relative_motion() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+
+    prompt = build_command_prompt(
+        user_input="向上移动2厘米",
+        skills=runtime.skills,
+    )
+
+    assert "move_arm" in prompt
+    assert "移动到 x/y/z" in prompt
+    assert "基座坐标系绝对位置" in prompt
+    assert "move_relative" in prompt
+    assert "参数：dx, dy, dz" in prompt
+    assert "向上移动2厘米" in prompt
+    assert "厘米必须除以 100 换算成米" in prompt
+    assert "dz=0.02" in prompt
+    assert "不得猜测当前 TCP" in prompt
+    assert "未定义方向" in prompt
+
+    runtime.shutdown()
+
+
+def test_fake_llm_generates_two_centimeter_upward_relative_command() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response=(
+                '{"skill_name":"move_relative",'
+                '"params":{"dx":0.0,"dy":0.0,"dz":0.02}}'
+            )
+        ),
+        skills=runtime.skills,
+    )
+
+    command = generator.generate("向上移动2厘米")
+
+    assert command.skill_name == "move_relative"
+    assert command.params == {"dx": 0.0, "dy": 0.0, "dz": 0.02}
+
+    runtime.shutdown()
+
+
 def test_llm_loop_reports_client_error_and_allows_next_input() -> None:
     runtime = build_mock_runtime(move_duration_seconds=0.0)
 

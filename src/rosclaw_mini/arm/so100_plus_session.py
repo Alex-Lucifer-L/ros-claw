@@ -36,6 +36,7 @@ from rosclaw_mini.safety.limits import (
     SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
     WorkspaceLimits,
     build_so100_plus_right_follower_execution_joint_limits,
+    resolve_relative_tcp_target,
 )
 
 
@@ -82,6 +83,13 @@ class SO100PlusSessionAdapter(Protocol):
     """会话所需的现有 Adapter 原子操作子集。"""
 
     def move_to(self, x: float, y: float, z: float) -> None: ...
+
+    def plan_move_to(
+        self,
+        x: float,
+        y: float,
+        z: float,
+    ) -> JointMotionPlan: ...
 
     def move_joints(self, joint_radians: Sequence[float]) -> None: ...
 
@@ -540,7 +548,12 @@ class SO100PlusArmSession:
     def prepare_command(self, command: Command) -> None:
         """Controller 在标记提交前注册动作的 stop 世代。"""
 
-        if command.skill_name in {"move_arm", "open_gripper", "close_gripper"}:
+        if command.skill_name in {
+            "move_arm",
+            "move_relative",
+            "open_gripper",
+            "close_gripper",
+        }:
             if self.state is ArmSessionState.WORK:
                 self._activate(self._work_adapter, command=command)
             return
@@ -694,16 +707,60 @@ class SO100PlusArmSession:
                 self._work_tcp_position_m,
             )
 
+    def _execute_work_target(
+        self,
+        target_position_m: Sequence[float],
+        current_snapshot: SO100PlusPoseSnapshot,
+    ) -> tuple[float, float, float]:
+        """规划、固化、MuJoCo 验证并执行同一个正式工作区计划。"""
+
+        target = SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS.validate_position(
+            *target_position_m
+        )
+        gripper_degrees, gripper_qpos = self._snapshot_gripper_qpos(
+            current_snapshot
+        )
+        try:
+            plan = self._work_adapter.plan_move_to(*target)
+        except Exception as error:
+            raise RuntimeError(f"工作区绝对目标规划失败：{error}") from error
+        try:
+            final_plan = self._work_adapter.materialize_joint_plan(
+                plan,
+                held_gripper_driver_degrees=gripper_degrees,
+            )
+            verified = (
+                self._trajectory_validator.verify_collision_free_sequence(
+                    (final_plan,),
+                    self._kinematics,
+                    gripper_qpos=gripper_qpos,
+                )
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"工作区完整轨迹 MuJoCo 预检查失败：{error}"
+            ) from error
+        try:
+            for verified_plan in verified.plans:
+                self._work_adapter.execute_joint_plan(verified_plan)
+        except Exception as error:
+            raise RuntimeError(f"工作区已验证轨迹执行失败：{error}") from error
+        return target
+
     def move_arm(self, command: Command) -> ExecutionResult:
         rejected = self._require_state(command, ArmSessionState.WORK)
         if rejected is not None:
             return rejected
         self._activate(self._work_adapter, command=command)
         try:
-            self._work_adapter.move_to(
-                command.params["x"],
-                command.params["y"],
-                command.params["z"],
+            current_snapshot = self._pose_reader()
+            self._execute_work_target(
+                (
+                    command.params["x"],
+                    command.params["y"],
+                    command.params["z"],
+                ),
+                current_snapshot,
             )
         except Exception as error:
             return self._failure(
@@ -713,6 +770,39 @@ class SO100PlusArmSession:
         finally:
             self._deactivate(self._work_adapter)
         return self._success(command, "夹爪 TCP 已完成工作区移动")
+
+    def move_relative(self, command: Command) -> ExecutionResult:
+        rejected = self._require_state(command, ArmSessionState.WORK)
+        if rejected is not None:
+            return rejected
+        self._activate(self._work_adapter, command=command)
+        try:
+            current_snapshot = self._pose_reader()
+            displacement = (
+                command.params["dx"],
+                command.params["dy"],
+                command.params["dz"],
+            )
+            target = resolve_relative_tcp_target(
+                current_snapshot.tcp_position_m,
+                displacement,
+                SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+            )
+            self._execute_work_target(target, current_snapshot)
+        except Exception as error:
+            return self._failure(
+                command,
+                f"move_relative 工作区运动阶段失败：{error}",
+            )
+        finally:
+            self._deactivate(self._work_adapter)
+        return self._success(
+            command,
+            (
+                f"夹爪 TCP 已从 {current_snapshot.tcp_position_m} m 相对移动 "
+                f"dx/dy/dz={displacement} m，最终位置 {target} m"
+            ),
+        )
 
     def open_gripper(self, command: Command) -> ExecutionResult:
         rejected = self._require_state(command, ArmSessionState.WORK)

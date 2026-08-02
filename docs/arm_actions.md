@@ -116,6 +116,29 @@ MuJoCo 单调上升、无新增接触检查，不能只靠角度余量放行。
 - 所有输入必须是有限数值，并且位于调用方显式传入的
   `WorkspaceLimits` 内。
 
+### 4.1.1 `move_relative(dx, dy, dz)`
+
+`move_relative` 的三个参数也以米为单位，但表示基座坐标系
+中的位移量，不是绝对坐标。运行时在 Handler/会话开始执行后
+才读取当前 TCP：
+
+```text
+target_x = current_x + dx
+target_y = current_y + dy
+target_z = current_z + dz
+```
+
+`dx > 0`、`dy > 0`、`dz > 0` 分别表示基座系 `+X`、`+Y`、
+`+Z`，其中 `+Z` 是向上。例如当前 TCP 为
+`(0.35, -0.01, 0.24) m`，`move_relative(0, 0, 0.02)` 的最终
+绝对目标是 `(0.35, -0.01, 0.26) m`。
+
+当前 TCP 不由 LLM 猜测，也不使用命令生成时或程序启动时的
+缓存。最终绝对目标会经过与 `move_arm` 相同的正式工作空间、
+IK、关节限制、MuJoCo 轨迹预检、运行保护和 `stop` 链路。
+越界时会在任何运动之前拒绝，错误中包含当前 TCP、位移量、
+最终目标和具体越界轴。
+
 ### 4.2 原点和坐标轴
 
 坐标系使用 `lerobot_kinematics` SO-100 Plus 模型的底座固定坐标系：
@@ -568,6 +591,7 @@ adapter.disconnect_cameras()
 | Skill | Adapter 原子动作 | 状态 |
 | --- | --- | --- |
 | `move_arm` | `move_to(x, y, z)` | 通用构造函数需显式范围；right follower 可使用已登记的专用构造函数 |
+| `move_relative` | 执行时读取 TCP，计算绝对目标后复用 `move_to` 安全链 | 需显式工作空间；真机只在 WORK 状态放行 |
 | `open_gripper` | `open_gripper()` | 已实现 |
 | `close_gripper` | `close_gripper()` | 已实现 |
 | `stop` | `stop()` | 已实现 |
@@ -597,7 +621,7 @@ MotionLimits 和 right-follower Skills，把真实 Adapter 接入相同 Gateway
 | --- | --- | --- |
 | `REST` | 真实反馈符合本机 `follower_rest` 逐关节容差 | `unfold_arm` |
 | `TRANSITION` | 正在展开、返回工作初始点或收纳 | 只允许 `stop` |
-| `WORK` | 实际 TCP 和关节角通过 JoyCon 工作初始姿态门禁 | `move_arm`、`fold_arm`、`open_gripper`、`close_gripper` |
+| `WORK` | 实际 TCP 和关节角通过 JoyCon 工作初始姿态门禁 | `move_arm`、`move_relative`、`fold_arm`、`open_gripper`、`close_gripper` |
 | `UNVERIFIED` | 姿态无法认证，或状态转换失败/被中断 | 只允许 `stop` 和安全退出 |
 
 启动连接后必须读取实际反馈再分类，不能假定机械臂位于收纳姿态：
@@ -663,7 +687,7 @@ MuJoCo 模型或依赖不可用时保持失败关闭。普通统一入口只在�
 REST
 → unfold_arm
 → WORK
-→ move_arm / open_gripper / close_gripper
+→ move_arm / move_relative / open_gripper / close_gripper
 → fold_arm
 → REST
 → exit

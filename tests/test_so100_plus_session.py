@@ -25,6 +25,9 @@ from rosclaw_mini.arm.so100_plus_trajectory_validation import (
 )
 from rosclaw_mini.command_schema.commands import Command
 from rosclaw_mini.execution.controller import ExecutionController
+from rosclaw_mini.safety.limits import (
+    SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+)
 
 
 class LinearFakeKinematics:
@@ -145,6 +148,17 @@ class RecordingSessionAdapter:
 
     def move_to(self, x, y, z) -> None:
         self._record("move_to", x, y, z)
+
+    def plan_move_to(self, x, y, z):
+        self._record("plan_move_to", x, y, z)
+        current = (0.0,) * 6
+        target = (0.01,) * 6
+        return JointMotionPlan(
+            target_position_m=(x, y, z),
+            current_joint_radians=current,
+            target_joint_radians=target,
+            waypoints_radians=(target,),
+        )
 
     def move_joints(self, joint_radians) -> None:
         self._record("move_joints", tuple(joint_radians))
@@ -848,6 +862,130 @@ def test_fold_is_rejected_outside_work(snapshot_factory):
     assert transition.calls == []
 
 
+def test_move_relative_uses_execution_time_tcp_and_verified_absolute_plan():
+    kinematics = LinearFakeKinematics()
+    current_snapshot = replace(
+        _work_snapshot(kinematics),
+        tcp_position_m=(0.35, -0.01, 0.24),
+    )
+    work = RecordingSessionAdapter()
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        current_snapshot,
+        work_adapter=work,
+        trajectory_validator=validator,
+    )
+
+    result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.0, "dy": 0.0, "dz": 0.02},
+        )
+    )
+
+    assert result.success is True
+    assert work.calls[0][0] == "plan_move_to"
+    assert work.calls[0][1:] == pytest.approx((0.35, -0.01, 0.26))
+    assert work.calls[1][0] == "execute_joint_plan"
+    validated_plan = validator.return_calls[0][0][0]
+    executed_plan = work.calls[1][1]
+    assert executed_plan is validated_plan
+    assert executed_plan is work.materialized_plans[0]
+    assert all(call[0] != "move_to" for call in work.calls)
+    assert "dx/dy/dz=(0.0, 0.0, 0.02)" in result.message
+    assert "最终位置 (0.35, -0.01, 0.26)" in result.message
+
+
+def test_move_relative_rejects_workspace_target_before_plan_or_motion():
+    kinematics = LinearFakeKinematics()
+    workspace = SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
+    current = (
+        workspace.x.maximum - 0.001,
+        0.0,
+        0.22,
+    )
+    work = RecordingSessionAdapter()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        replace(_work_snapshot(kinematics), tcp_position_m=current),
+        work_adapter=work,
+    )
+
+    result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.01, "dy": 0.0, "dz": 0.0},
+        )
+    )
+
+    assert result.success is False
+    assert session.state is ArmSessionState.WORK
+    assert work.calls == []
+    assert work.materialized_plans == []
+    assert "当前 TCP=" in result.message
+    assert "请求位移 dx/dy/dz=" in result.message
+    assert "最终目标=" in result.message
+    assert "x=" in result.message
+    assert "超出允许范围" in result.message
+
+
+def test_move_relative_collision_precheck_prevents_execution():
+    kinematics = LinearFakeKinematics()
+    work = RecordingSessionAdapter()
+    validator = RecordingTrajectoryValidator(
+        return_error=SO100PlusTrajectoryValidationError(
+            "模拟工作区路径碰撞"
+        )
+    )
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        replace(
+            _work_snapshot(kinematics),
+            tcp_position_m=(0.35, -0.01, 0.24),
+        ),
+        work_adapter=work,
+        trajectory_validator=validator,
+    )
+
+    result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.0, "dy": 0.0, "dz": 0.02},
+        )
+    )
+
+    assert result.success is False
+    assert "工作区完整轨迹 MuJoCo 预检查失败" in result.message
+    assert "模拟工作区路径碰撞" in result.message
+    assert [call[0] for call in work.calls] == ["plan_move_to"]
+
+
+def test_move_arm_keeps_absolute_target_semantics_with_shared_work_path():
+    kinematics = LinearFakeKinematics()
+    work = RecordingSessionAdapter()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        replace(
+            _work_snapshot(kinematics),
+            tcp_position_m=(0.35, -0.01, 0.24),
+        ),
+        work_adapter=work,
+    )
+
+    result = session.move_arm(
+        _command(
+            "move_arm",
+            {"x": 0.36, "y": -0.01, "z": 0.25},
+        )
+    )
+
+    assert result.success is True
+    assert result.message == "夹爪 TCP 已完成工作区移动"
+    assert work.calls[0] == ("plan_move_to", 0.36, -0.01, 0.25)
+    assert work.calls[1][0] == "execute_joint_plan"
+
+
 def test_move_and_gripper_actions_are_rejected_outside_work():
     for snapshot_factory in (_rest_snapshot, _unknown_snapshot):
         session, _kinematics, work, _transition = _session(snapshot_factory)
@@ -858,10 +996,17 @@ def test_move_and_gripper_actions_are_rejected_outside_work():
                 {"x": 0.35, "y": 0.0, "z": 0.22},
             )
         )
+        relative_result = session.move_relative(
+            _command(
+                "move_relative",
+                {"dx": 0.0, "dy": 0.0, "dz": 0.02},
+            )
+        )
         open_result = session.open_gripper(_command("open_gripper"))
         close_result = session.close_gripper(_command("close_gripper"))
 
         assert move_result.success is False
+        assert relative_result.success is False
         assert open_result.success is False
         assert close_result.success is False
         assert work.calls == []

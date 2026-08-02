@@ -119,11 +119,38 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | `json` | `so100_plus` | 人工提供结构化命令，显式连接真机 |
 | `llm` | `so100_plus` | 模型生成 Command，再经过完整安全链控制真机；风险最高 |
 
+当前 CLI 参数：
+
+| 参数 | 默认值 | 用途 |
+| --- | --- | --- |
+| `--input-mode {json,llm}` | `json` | 选择结构化 JSON 或自然语言输入 |
+| `--backend {mock,so100_plus}` | `mock` | 选择内存 Mock 或真实 SO-100 Plus |
+| `--port` | `/dev/lerobot_right` | 真机串口；Mock 模式不使用 |
+| `--calibration-dir` | `lerobot-joycon_plus/.cache/calibration/so100_plus` | 真机校准目录 |
+| `--follower-name` | `right` | 真机 follower 身份 |
+| `--acknowledge-so100-plus-risk` | 未设置 | 真机必需的显式风险确认 |
+
+可以随时查看代码中实际生效的参数：
+
+```bash
+PYTHONPATH=src python -m rosclaw_mini.main --help
+```
+
 移动 Mock TCP：
 
 ```json
 {"skill_name": "move_arm", "params": {"x": 0.5, "y": 0.4, "z": 0.3}}
 ```
+
+`move_arm` 的 `x/y/z` 是基座坐标系中的绝对位置。Mock 已有当前
+TCP 后，也可以按当前位置相对移动：
+
+```json
+{"skill_name": "move_relative", "params": {"dx": 0.0, "dy": 0.0, "dz": 0.02}}
+```
+
+这表示沿基座坐标系 `+Z` 向上移动 `2 cm`；命令执行时才读取
+当前 TCP，LLM 不会预先猜测绝对目标。
 
 夹爪与停止：
 
@@ -182,6 +209,24 @@ Skill Validator、Safety Checker 和 `ExecutionController`。模型只承担一�
 | `ROSCLAW_LLM_MODEL` | 是 | 服务端接受的模型 ID |
 | `ROSCLAW_LLM_API_KEY` | 否 | Bearer Token；本地 Ollama 等无鉴权服务可以不设置 |
 
+客户端只使用 Python 标准库，不需要为了 LLM 接入新增 OpenAI SDK。请求是
+同步、非流式 POST，请求体结构为：
+
+```json
+{
+  "model": "<ROSCLAW_LLM_MODEL>",
+  "messages": [
+    {"role": "user", "content": "<CommandGenerator 构造的完整 Prompt>"}
+  ],
+  "stream": false
+}
+```
+
+当 API Key 非空时，请求增加
+`Authorization: Bearer <ROSCLAW_LLM_API_KEY>`；未设置时完全省略该请求头。
+客户端默认超时为 30 秒，并拒绝空 Prompt、空模型名、非 HTTP(S) 地址、
+没有主机名的 URL，以及带查询参数或片段的 `base_url`。
+
 配置会在创建 `ArmRuntime` **之前**检查。`BASE_URL` 或 `MODEL` 缺失时，
 程序返回非零退出码，不创建机械臂 Runtime，因此即使命令行同时写了真机
 后端，也不会因为 LLM 配置错误而连接机械臂。API Key 只从环境变量进入
@@ -236,6 +281,22 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 `LLM 调用失败` 并继续等待下一条输入。模型输出不是合法 Command 时也只会
 拒绝本次输入，不会绕过原有安全检查。
 
+常见输出和含义：
+
+| 输出 | 含义 | 会不会退出循环 |
+| --- | --- | --- |
+| `LLM 配置错误: ...` | 启动环境变量或客户端参数无效；Runtime 尚未创建 | 会，退出码非零 |
+| `LLM 调用失败: ...` | 网络、超时、HTTP 或服务响应结构错误 | 不会，可继续输入 |
+| `模型返回的内容不是合法 JSON` | HTTP 成功，但模型文本不是 JSON | 不会 |
+| `模型生成的 Command 不合法: ...` | JSON 存在，但不符合 Command 数据结构 | 不会 |
+| `当前有命令正在执行...` | Controller 正忙，拒绝第二个普通命令 | 不会 |
+| `命令 ... 已提交` | Command 已进入后台 Controller | 不会 |
+
+自然语言中的停止请求仍由模型生成 `stop` Command，然后
+`dispatch_command()` 调用 `controller.request_stop()`；它不作为第二个
+普通后台动作排队，因此可以中断正在运行的 `move_arm`、`move_relative`、
+`unfold_arm` 或 `fold_arm`。输入 `result` 可以查询最近一次后台命令结果。
+
 > [!WARNING]
 > `llm` 只是输入方式，不是安全授权。模型可能理解错误或生成错误参数；
 > 使用真机时，命令仍必须通过会话状态、Skill、参数、工作空间、运动学、
@@ -269,7 +330,7 @@ PYTHONPATH=src:lerobot-joycon_plus python -m rosclaw_mini.main \
 REST
 → unfold_arm
 → WORK
-→ move_arm / open_gripper / close_gripper
+→ move_arm / move_relative / open_gripper / close_gripper
 → fold_arm
 → REST
 ```
@@ -422,6 +483,18 @@ flowchart TD
 → ExecutionResult
 ```
 
+`move_relative` 在 Handler 开始执行时多做一次当前 TCP 读取和目标
+合成，然后复用同一条绝对目标运动链：
+
+```text
+move_relative(dx, dy, dz)
+→ 执行时读取 current_tcp
+→ target = current_tcp + (dx, dy, dz)
+→ 检查最终绝对目标的正式工作空间
+→ 复用 move_arm 的 IK、关节限制、MuJoCo 轨迹预检、运行保护和 stop
+→ ExecutionResult
+```
+
 ### LLM 模式
 
 自然语言模式只在 JSON Parser 之前多了一段可替换的命令生成过程：
@@ -485,11 +558,12 @@ controller.submit(move_command)
 
 ### 当前内置 Skill
 
-`build_arm_skills(adapter, workspace_limits)` 创建五个 Skill：
+`build_arm_skills(adapter, workspace_limits)` 创建六个 Skill：
 
 | Skill | 风险等级 | 参数 | Adapter 映射 | 默认状态 |
 | --- | --- | --- | --- | --- |
 | `move_arm` | `medium` | `x`, `y`, `z` | `move_to(x, y, z)` | 只有显式提供工作空间才启用 |
+| `move_relative` | `medium` | `dx`, `dy`, `dz` | 执行时读取 TCP，合成绝对目标后复用 `move_to` 安全链 | 只有显式提供工作空间才启用 |
 | `open_gripper` | `low` | 无 | `open_gripper()` | 启用 |
 | `close_gripper` | `low` | 无 | `close_gripper()` | 启用 |
 | `stop` | `low` | 无 | `stop()` | 启用 |
@@ -512,7 +586,7 @@ controller.submit(move_command)
 | --- | --- |
 | `REST` | `unfold_arm`、`stop` |
 | `TRANSITION` | 仅 `stop` |
-| `WORK` | `move_arm`、`fold_arm`、`open_gripper`、`close_gripper`、`stop` |
+| `WORK` | `move_arm`、`move_relative`、`fold_arm`、`open_gripper`、`close_gripper`、`stop` |
 | `UNVERIFIED` | 仅 `stop` 和安全退出；拒绝所有产生运动的 Skill |
 
 LLM 模式也使用同一份运行时 Skill Registry，所以状态门禁不会因输入方式
@@ -538,6 +612,7 @@ open_gripper()
 | `connect()` | 连接后端 |
 | `disconnect()` | 断开后端通信 |
 | `move_to(x, y, z)` | 把夹爪 TCP 移到绝对坐标 |
+| `read_tcp_position()` | 从当前后端反馈读取基座系 TCP 绝对坐标 |
 | `open_gripper()` | 打开夹爪 |
 | `close_gripper()` | 关闭夹爪 |
 | `stop()` | 取消剩余动作并保持当前位置 |
@@ -642,6 +717,22 @@ adapter.connect()
 ```
 
 不是 `move_to(0, 0, 0.10)`。
+
+### `move_relative(dx, dy, dz)` 相对坐标语义
+
+- `dx/dy/dz` 全部必填，单位为米；
+- 它们是基座坐标系中的位移量，`dz > 0` 表示向上；
+- 当前 TCP 在命令真正开始执行时读取，不使用启动缓存或 LLM
+  猜测值；
+- 计算出的最终绝对目标必须位于同一正式工作空间，然后走
+  `move_arm` 相同的 IK、轨迹预检、执行保护和 `stop` 链路；
+- 真机会话只在 `WORK` 状态放行；`REST`、`TRANSITION` 和
+  `UNVERIFIED` 都会拒绝。
+
+例如当前 TCP 为 `(0.35, -0.01, 0.24) m`，执行
+`move_relative(0, 0, 0.02)` 的最终目标是
+`(0.35, -0.01, 0.26) m`。如果最终目标越界，失败结果会同时列出
+当前 TCP、请求位移、计算目标和违反的轴范围，且不会下发运动。
 
 ### 当前姿态策略
 
@@ -971,7 +1062,7 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 - 启用真实电机力矩；
 - 移动真实机械臂；
 - 修改校准或 PID EEPROM；
-- 打开 `/dev/video*`。
+- 打开 `/dev/video*`；
 - 发送真实 LLM HTTP 请求；
 - 读取或记录真实 API Key。
 

@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.command_schema.commands import Command
 from rosclaw_mini.safety.checker import check_command
@@ -134,6 +136,23 @@ def test_reject_non_finite_numeric_parameter():
     result = check_command(command, skills["move_arm"])
 
     assert result.is_safe is False
+    assert "有限数值" in result.reason
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    (math.nan, math.inf, -math.inf),
+)
+def test_move_relative_rejects_non_finite_displacement(invalid_value):
+    command = make_command(
+        "move_relative",
+        {"dx": 0.0, "dy": invalid_value, "dz": 0.02},
+    )
+
+    result = check_command(command, skills["move_relative"])
+
+    assert result.is_safe is False
+    assert "dy" in result.reason
     assert "有限数值" in result.reason
 
 

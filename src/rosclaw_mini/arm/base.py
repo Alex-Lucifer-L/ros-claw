@@ -64,6 +64,11 @@ class ArmAdapter(ABC):
         pass
 
     @abstractmethod
+    def read_tcp_position(self) -> tuple[float, float, float]:
+        """读取命令实际执行时的夹爪 TCP 基座系绝对坐标，单位为米。"""
+        pass
+
+    @abstractmethod
     def open_gripper(self) -> None:
         """
         将不同厂商的夹爪打开函数，

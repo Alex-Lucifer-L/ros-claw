@@ -1,5 +1,9 @@
 from rosclaw_mini.arm.base import ArmAdapter
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
+from rosclaw_mini.safety.limits import (
+    WorkspaceLimits,
+    resolve_relative_tcp_target,
+)
 
 
 class ArmHandlers:
@@ -26,10 +30,23 @@ class ArmHandlers:
     厂商驱动的差异由具体 Adapter 负责处理。
     """
 
-    def __init__(self, adapter: ArmAdapter):
+    def __init__(
+        self,
+        adapter: ArmAdapter,
+        workspace_limits: WorkspaceLimits | None = None,
+    ):
         # 保存当前 Handler 使用的机械臂 Adapter。
         # 这里既可以传入 MockArmAdapter，也可以传入真实机械臂 Adapter。
         self.adapter = adapter
+        self.workspace_limits = workspace_limits
+
+    def _move_to_absolute_target(
+        self,
+        target: tuple[float, float, float],
+    ) -> None:
+        """绝对与相对 Skill 共用的 Adapter 绝对目标入口。"""
+
+        self.adapter.move_to(*target)
 
     def move_arm(self, command: Command) -> ExecutionResult:
         """
@@ -43,7 +60,7 @@ class ArmHandlers:
 
         # 调用统一硬件接口。
         # 具体是模拟执行还是真实执行，由传入的 Adapter 决定。
-        self.adapter.move_to(x, y, z)
+        self._move_to_absolute_target((x, y, z))
 
         # 将执行完成的信息转换成系统统一的执行结果。
         return ExecutionResult(
@@ -51,6 +68,33 @@ class ArmHandlers:
             skill_name=command.skill_name,
             success=True,
             message=f"夹爪 TCP 已移动到位置: {x}, {y}, {z}",
+        )
+
+    def move_relative(self, command: Command) -> ExecutionResult:
+        """从执行时读取的 TCP 计算基座系相对位移，再走绝对目标入口。"""
+
+        if self.workspace_limits is None:
+            raise RuntimeError("未配置工作空间，相对移动保持禁用。")
+        displacement = (
+            command.params["dx"],
+            command.params["dy"],
+            command.params["dz"],
+        )
+        current = self.adapter.read_tcp_position()
+        target = resolve_relative_tcp_target(
+            current,
+            displacement,
+            self.workspace_limits,
+        )
+        self._move_to_absolute_target(target)
+        return ExecutionResult(
+            command_id=command.command_id,
+            skill_name=command.skill_name,
+            success=True,
+            message=(
+                f"夹爪 TCP 已从 {current} m 相对移动 "
+                f"dx/dy/dz={displacement} m，最终位置 {target} m"
+            ),
         )
 
     def open_gripper(self, command: Command) -> ExecutionResult:

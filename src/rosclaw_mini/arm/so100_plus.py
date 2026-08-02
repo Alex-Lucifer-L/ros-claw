@@ -669,6 +669,23 @@ class SO100PlusAdapter(ArmAdapter):
             if owns_action:
                 self.end_motion_action()
 
+    def read_tcp_position(self) -> tuple[float, float, float]:
+        """从六个真实关节反馈复算当前 TCP，不使用启动缓存。"""
+
+        if not self.is_connected:
+            raise RuntimeError("读取 TCP 前必须先显式连接机械臂。")
+        self._raise_if_motion_planning_disabled()
+        with self._motion_lock:
+            follower_bus = self._follower_bus()
+            with self._bus_lock:
+                driver_degrees = self._read_arm_driver_degrees_locked(
+                    follower_bus
+                )
+            joint_radians = self.kinematics.driver_degrees_to_model_radians(
+                driver_degrees
+            )
+            return tuple(self.kinematics.forward_position(joint_radians))
+
     def move_joints(
         self,
         joint_radians: Sequence[float],

@@ -65,6 +65,10 @@ class RecordingAdapter(ArmAdapter):
     def move_to(self, x: float, y: float, z: float) -> None:
         self.calls.append("move_to")
 
+    def read_tcp_position(self) -> tuple[float, float, float]:
+        self.calls.append("read_tcp_position")
+        return (0.0, 0.0, 0.0)
+
     def open_gripper(self) -> None:
         self.calls.append("open_gripper")
 

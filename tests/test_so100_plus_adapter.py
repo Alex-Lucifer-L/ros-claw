@@ -1028,6 +1028,36 @@ def test_move_to_requires_explicit_motion_execution_config():
     assert goal_write_calls(robot) == []
 
 
+def test_read_tcp_position_uses_current_joint_feedback_without_motor_write():
+    class FeedbackKinematics(FakeMotionKinematics):
+        def forward_position(self, joint_radians):
+            return tuple(joint_radians[:3])
+
+    robot = FakeRobot()
+    kinematics = FeedbackKinematics()
+    adapter = make_adapter(
+        robot,
+        kinematics=kinematics,
+        motion_limits=make_motion_limits(),
+    )
+    adapter.connect()
+    robot.bus.all_positions[:6] = [35.0, -1.0, 24.0, 4.0, 5.0, 6.0]
+    writes_before_read = tuple(robot.bus.write_calls)
+
+    position = adapter.read_tcp_position()
+
+    assert position == pytest.approx((0.35, -0.01, 0.24))
+    assert kinematics.convert_calls[-1] == (
+        35.0,
+        -1.0,
+        24.0,
+        4.0,
+        5.0,
+        6.0,
+    )
+    assert tuple(robot.bus.write_calls) == writes_before_read
+
+
 def test_move_to_executes_planned_waypoint_and_preserves_gripper():
     robot = FakeRobot()
     waits = []

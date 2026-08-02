@@ -23,6 +23,7 @@ skills = build_arm_skills(
 
 def test_find_existing_skills():
     assert find_skill("move_arm", skills).skill_name == "move_arm"
+    assert find_skill("move_relative", skills).skill_name == "move_relative"
     assert find_skill("open_gripper", skills).skill_name == "open_gripper"
     assert find_skill("disable_torque", skills).skill_name == "disable_torque"
 
@@ -35,6 +36,7 @@ def test_move_skill_is_disabled_without_explicit_workspace_limits():
     skills_without_limits = build_arm_skills(MockArmAdapter())
 
     assert skills_without_limits["move_arm"].enabled is False
+    assert skills_without_limits["move_relative"].enabled is False
     assert skills_without_limits["open_gripper"].enabled is True
     assert skills_without_limits["disable_torque"].enabled is False
     assert skills_without_limits["disable_torque"].risk_level == "high"
@@ -54,3 +56,13 @@ def test_right_follower_skills_use_registered_formal_workspace():
     assert move.params_schema["y"].max_value == workspace.y.maximum
     assert move.params_schema["z"].min_value == workspace.z.minimum
     assert move.params_schema["z"].max_value == workspace.z.maximum
+
+    relative = right_skills["move_relative"]
+    assert relative.enabled is True
+    assert relative.risk_level == "medium"
+    assert tuple(relative.params_schema) == ("dx", "dy", "dz")
+    assert all(spec.required for spec in relative.params_schema.values())
+    assert all(
+        spec.min_value is None and spec.max_value is None
+        for spec in relative.params_schema.values()
+    )
