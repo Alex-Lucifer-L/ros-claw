@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="摄像头设备路径，例如 /dev/video2 或 /dev/v4l/by-id/...",
     )
     parser.add_argument("--name", default="right")
-    parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument(

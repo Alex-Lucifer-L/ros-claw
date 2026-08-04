@@ -626,13 +626,16 @@ adapter.stop()
 | 类型 | OpenCV USB camera |
 | 格式 | RGB |
 | 分辨率 | 640 × 480 |
-| 帧率 | 60 FPS |
+| 帧率 | 20 FPS（当前 Sonix FHD Webcam 实测协商值） |
 | 输出键 | `observation.images.right` |
 | 数组布局 | HWC，即 `(480, 640, 3)` |
 
 应优先使用稳定的 `/dev/v4l/by-id/...-video-index0` 或自建 udev 别名，
-不要在仓库中提交摄像头序列号。当前已安装 OpenCV 并通过假设备测试，
-但真实摄像头的单帧抓取尚未执行。
+不要在仓库中提交摄像头序列号。当前腕部 Sonix FHD Webcam 已完成一次
+只读单帧验证：V4L2、YUYV、640 × 480、20 FPS，实际数组为
+`(480, 640, 3)`。当前已用 15 张真实棋盘图片求得第一版本地内参
+（RMS `0.492674 px`），但仍需独立新视角去畸变验收，也不代表已完成
+手眼标定。详细流程见 `docs/vision_observation.md`。
 
 摄像头按需独立使用：
 
@@ -908,7 +911,7 @@ python scripts/check_so100_plus_adapter_move_to.py \
 python scripts/check_so100_plus_camera.py \
   --device /dev/v4l/by-id/<right-camera>-video-index0 \
   --name right \
-  --fps 60 \
+  --fps 20 \
   --width 640 \
   --height 480 \
   --acknowledge-camera-capture

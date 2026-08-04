@@ -102,3 +102,17 @@ def test_camera_frame_is_saved_only_when_explicitly_requested(tmp_path: Path):
     make_service(events).observe(save_frame_path=output)
     assert ("save", "camera-frame", output) in events
 
+
+def test_service_prefers_stable_camera_device_path():
+    events = []
+    device = "/dev/v4l/by-id/wrist-camera-video-index0"
+    service = VisionService(
+        client=FakeVLMClient(events),
+        camera_index=0,
+        camera_device=device,
+        camera_factory=lambda source: FakeCamera(source, events),
+        image_processor=FakeImageProcessor(events),
+    )
+    observation = service.observe()
+    assert events[0] == ("open", device)
+    assert observation.source == f"camera:{device}"

@@ -57,7 +57,7 @@ class SO100PlusCameraConfig:
 
     name: str
     device: int | str | Path
-    fps: int = 60
+    fps: int = 20
     width: int = 640
     height: int = 480
     color_mode: str = "rgb"

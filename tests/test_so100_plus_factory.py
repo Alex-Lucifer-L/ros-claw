@@ -147,7 +147,7 @@ def test_camera_factory_builds_unconnected_readme_compatible_camera():
     camera = cameras["right"]
     assert camera.device == "/dev/null"
     assert camera.kwargs == {
-        "fps": 60,
+        "fps": 20,
         "width": 640,
         "height": 480,
         "color_mode": "rgb",

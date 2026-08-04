@@ -13,6 +13,9 @@ venv/
 env/
 .env
 
+# Machine-bound camera calibration images and results.
+local_calibration/
+
 .vscode/
 .idea/
 

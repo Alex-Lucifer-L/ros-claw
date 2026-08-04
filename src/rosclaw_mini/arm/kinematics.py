@@ -180,6 +180,25 @@ class SO100PlusKinematics:
         transform = self._forward_transform(joints)
         return tuple(float(value) for value in transform[:3, 3])
 
+    def forward_transform(
+        self,
+        joint_radians: Sequence[float],
+    ) -> np.ndarray:
+        """Return ``base_T_tcp`` as a finite 4x4 homogeneous transform.
+
+        The matrix maps coordinates expressed in the fixed TCP frame into the
+        robot-base frame.  It uses the same FK and TCP offset as
+        :meth:`forward_position`; callers receive a fresh array and cannot
+        mutate kinematics state.
+        """
+
+        joints = _finite_vector(
+            joint_radians,
+            expected_length=len(SO100_PLUS_ARM_JOINT_NAMES),
+            label="模型关节角",
+        )
+        return self._forward_transform(joints).copy()
+
     def solve_position(
         self,
         current_joint_radians: Sequence[float],

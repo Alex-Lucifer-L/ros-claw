@@ -56,7 +56,7 @@ Checker。
 | SO-100 Plus FK、IK、TCP、会话状态和受控转换轨迹 | 已实现；转换路径仍需现场复验 | 是，由真机运行时装配 |
 | 当前 `right_follower` WORK 空间 | 已接入 10 mm 网格的不规则 MuJoCo 可达集；旧 `12 × 6 × 12 cm` 是有真机代表点记录的核心区 | 是，只由 SO-100 Plus 会话门禁使用 |
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
-| USB 摄像头 → 千问 VLM → `SceneObservation` | V2.0 软件链路和 Fake 测试完成 | 是，必须显式选择 `--input-mode vision`；真实单帧/API 尚未验收 |
+| USB 摄像头 → 千问 VLM → `SceneObservation` | V2.0 软件链路和 Fake 测试完成；腕部相机真实单帧已读取 | 是，必须显式选择 `--input-mode vision`；真实百炼视觉 API 尚未验收 |
 | 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
 | OpenAI-compatible 同步 LLM 客户端 | 已实现，API Key 可选 | 是，必须显式选择 `--input-mode llm` |
 | 自然语言 → RAG → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
@@ -137,6 +137,7 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | `--follower-name` | `right` | 真机 follower 身份 |
 | `--acknowledge-so100-plus-risk` | 未设置 | 真机必需的显式风险确认 |
 | `--camera-index` | `0` | vision 模式使用的摄像头编号 |
+| `--camera-device` | 环境变量/未设置 | 稳定绝对设备路径，优先于数字编号 |
 | `--vlm-model` | 环境变量/默认值 | 千问视觉模型名，优先于 `DASHSCOPE_VL_MODEL` |
 | `--vision-question` | 未设置 | 提问一次并退出；省略时进入 observe/ask 交互 |
 | `--vision-image` | 未设置 | 使用本地图像，不打开摄像头 |
@@ -1129,8 +1130,9 @@ SO-100 Plus Adapter 原有的可选相机 Factory 和独立连接方法仍然保
 摄像头变成机械臂连接条件。
 
 完整配置、Schema、摄像头编号检查、运行命令和 V2.1 边界见
-[V2.0 只读视觉观察](docs/vision_observation.md)。真实摄像头和真实百炼
-视觉 API 尚未现场验收；当前也没有目标检测、深度、相机标定、手眼标定、
+[V2.0 只读视觉观察](docs/vision_observation.md)。腕部摄像头已完成一次
+真实单帧读取和 15 张多视角内参求解，当前 RMS 为 `0.492674 px`；
+尚需三张独立新视角去畸变验收。真实百炼视觉 API 尚未现场验收；当前也没有目标检测、深度、手眼标定、
 坐标转换或视觉伺服。
 
 ## 10. Python 调用示例
@@ -1387,6 +1389,12 @@ rosclaw-mini/
 | `src/rosclaw_mini/vision/service.py` | 协调单帧读取、图像处理、VLM 调用和结构化解析，不依赖运动模块 |
 | `src/rosclaw_mini/vision/vlm_client.py` | 复用 OpenAI-compatible messages 请求并发送千问多模态内容 |
 | `src/rosclaw_mini/vision/parser.py` | 严格校验 SceneObservation，拒绝机械臂三维坐标字段 |
+| `src/rosclaw_mini/vision/calibration.py` | 7×6、24 mm 棋盘角点检测，离线内参求解、误差报告与设备绑定哈希 |
+| `scripts/collect_wrist_camera_calibration_images.py` | 实时显示腕部相机和角点，按 Space/C 保存合格标定帧，不控制机械臂 |
+| `scripts/check_wrist_camera_intrinsics.py` | 验证内参哈希和设备绑定，实时对比原图/去畸变图并采集新视角误差 |
+| `src/rosclaw_mini/vision/hand_eye.py` | 棋盘 PnP、带哈希的同步数据集、OpenCV Tsai 手眼求解与固定标定板残差 |
+| `scripts/collect_so100_plus_hand_eye_samples.py` | 力矩关闭时只读同步采集真实关节反馈和腕部棋盘图像，不写电机 |
+| `scripts/calibrate_so100_plus_hand_eye.py` | 从已保存数据集离线求解 `tcp_T_camera`，不访问硬件 |
 | `docs/vision_observation.md` | V2.0 配置、运行、Schema、安全边界和 V2.1 说明 |
 | `knowledge/README.md` | 知识主题索引、静态/实时边界和更新规则 |
 | `src/rosclaw_mini/execution/controller.py` | 后台运行一个普通命令，并允许独立 stop 请求 |
@@ -1431,9 +1439,12 @@ rosclaw-mini/
 摄像头：
 
 - V2.0 单帧 → 千问 VLM → `SceneObservation` 软件链路已接入独立 CLI；
-- 真实 USB 摄像头和百炼视觉 API 组合尚未验收；
+- 腕部 USB 摄像头已完成独立单帧读取，但与百炼视觉 API 的组合尚未验收；
 - VLM bounding box 只是语义估计，不能用于精密抓取；
-- 没有目标检测、深度、相机内参、手眼标定、坐标转换和视觉闭环。
+- 已用 15 张真实多视角得到第一版内参，尚需三张未参与求解的新视角完成去畸变验收；
+- 手眼只读采集和离线求解已实现，但真实多姿态数据与 `tcp_T_camera`
+  尚未现场验收，不会自动接入运动链；
+- 没有目标检测、深度、已验收的像素到机械臂坐标转换和视觉闭环。
 
 工程化：
 

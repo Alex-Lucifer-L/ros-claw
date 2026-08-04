@@ -25,7 +25,7 @@ def _import_cv2_for_image():
         import cv2
     except (ImportError, OSError) as error:
         raise ImageEncodeError(
-            "OpenCV 不可用；请安装 requirements.txt 中的 opencv-python-headless。"
+            "OpenCV 不可用；请安装 requirements.txt 中的 opencv-python。"
         ) from error
     return cv2
 
@@ -123,4 +123,3 @@ class OpenCVImageProcessor:
             raise ImageEncodeError(f"保存捕获帧失败 {path}：{error}") from error
         if not success:
             raise ImageEncodeError(f"保存捕获帧失败：{path}")
-

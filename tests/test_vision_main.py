@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from rosclaw_mini.main import main, run_vision_command_loop
 from rosclaw_mini.vision.schemas import SceneObject, SceneObservation
@@ -83,6 +84,7 @@ def test_vision_main_builds_config_and_never_builds_arm_runtime():
     assert captured["vlm"]["model"] == "qwen-vl-test"
     assert captured["vlm"]["api_key"] == "placeholder"
     assert captured["service"]["camera_index"] == 0
+    assert captured["service"]["camera_device"] is None
     assert fake_service.calls == [
         {
             "question": "桌面上有什么？",
@@ -114,6 +116,29 @@ def test_vision_main_model_environment_and_dashscope_key_fallback():
     assert code == 0
     assert captured["model"] == "env-vl-model"
     assert captured["api_key"] == "placeholder"
+
+
+def test_vision_main_uses_stable_camera_device_from_environment():
+    captured = {}
+    fake_service = FakeVisionService()
+    device = "/dev/v4l/by-id/wrist-camera-video-index0"
+
+    def service_builder(**kwargs):
+        captured.update(kwargs)
+        return fake_service
+
+    code = main(
+        ["--input-mode", "vision", "--vision-question", "观察"],
+        vlm_client_builder=lambda **kwargs: object(),
+        vision_service_builder=service_builder,
+        environ={
+            "ROSCLAW_LLM_API_KEY": "placeholder",
+            "ROSCLAW_VISION_CAMERA_DEVICE": device,
+        },
+        output_func=lambda _message: None,
+    )
+    assert code == 0
+    assert captured["camera_device"] == Path(device)
 
 
 def test_vision_config_error_happens_before_runtime_creation():

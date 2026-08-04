@@ -13,7 +13,7 @@ from rosclaw_mini.vision.schemas import SceneObservation
 from rosclaw_mini.vision.vlm_client import VLMClient
 
 
-CameraFactory = Callable[[int], CameraAdapter]
+CameraFactory = Callable[[int | str], CameraAdapter]
 
 
 class VisionService:
@@ -24,6 +24,7 @@ class VisionService:
         *,
         client: VLMClient,
         camera_index: int = 0,
+        camera_device: str | Path | None = None,
         max_width: int = 1280,
         camera_factory: CameraFactory = CameraAdapter,
         image_processor: OpenCVImageProcessor | None = None,
@@ -33,12 +34,19 @@ class VisionService:
             raise ValueError("camera_index 必须是整数。")
         if camera_index < 0:
             raise ValueError("camera_index 不能为负数。")
+        if camera_device is not None:
+            camera_path = Path(camera_device)
+            if not camera_path.is_absolute():
+                raise ValueError("camera_device 必须是绝对设备路径。")
+            camera_source: int | str = str(camera_path)
+        else:
+            camera_source = camera_index
         if isinstance(max_width, bool) or not isinstance(max_width, int):
             raise ValueError("vision_max_width 必须是整数。")
         if max_width <= 0:
             raise ValueError("vision_max_width 必须大于 0。")
         self._client = client
-        self._camera_index = camera_index
+        self._camera_source = camera_source
         self._max_width = max_width
         self._camera_factory = camera_factory
         self._image_processor = image_processor or OpenCVImageProcessor()
@@ -56,9 +64,9 @@ class VisionService:
             source = f"image:{Path(image_path)}"
         else:
             # Device ownership is deliberately limited to one capture.
-            with self._camera_factory(self._camera_index) as camera:
+            with self._camera_factory(self._camera_source) as camera:
                 frame = camera.capture_frame()
-            source = f"camera:{self._camera_index}"
+            source = f"camera:{self._camera_source}"
             if save_frame_path is not None:
                 self._image_processor.save(frame, Path(save_frame_path))
 
@@ -76,4 +84,3 @@ class VisionService:
             source=source,
             model=self._client.model,
         )
-

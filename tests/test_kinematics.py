@@ -132,6 +132,29 @@ def test_forward_position_applies_tcp_offset_along_tool_local_x_axis():
     assert tcp_position == pytest.approx((0.20690, 0.00127, 0.30118))
 
 
+def test_forward_transform_exposes_same_base_t_tcp_pose_as_position():
+    quarter_turn_about_z = np.asarray(
+        (
+            (0.0, -1.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+    )
+    kinematics = SO100PlusKinematics(
+        robot=FakeKinematicsRobot(rotation=quarter_turn_about_z)
+    )
+    joints = (0.2, -0.1, 0.3, 0.0, 0.0, 0.0)
+
+    transform = kinematics.forward_transform(joints)
+
+    assert transform.shape == (4, 4)
+    assert transform[:3, :3] == pytest.approx(quarter_turn_about_z)
+    assert transform[:3, 3] == pytest.approx(
+        kinematics.forward_position(joints)
+    )
+    assert transform[3] == pytest.approx((0.0, 0.0, 0.0, 1.0))
+
+
 def test_same_position_returns_current_joints_without_calling_solver():
     robot = FakeKinematicsRobot()
     kinematics = SO100PlusKinematics(robot=robot)

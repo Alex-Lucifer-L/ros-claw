@@ -55,3 +55,20 @@ def test_camera_adapter_releases_when_context_body_raises():
             raise RuntimeError("boom")
     assert capture.released
 
+
+def test_camera_adapter_accepts_stable_absolute_device_path():
+    capture = FakeCapture()
+    sources = []
+    device = "/dev/v4l/by-id/test-wrist-camera-video-index0"
+    with CameraAdapter(
+        device,
+        capture_factory=lambda source: sources.append(source) or capture,
+    ) as camera:
+        assert camera.capture_frame() == "frame"
+    assert sources == [device]
+    assert capture.released
+
+
+def test_camera_adapter_rejects_relative_device_path():
+    with pytest.raises(ValueError, match="绝对设备路径"):
+        CameraAdapter("video2")

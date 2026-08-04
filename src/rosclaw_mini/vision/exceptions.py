@@ -36,3 +36,18 @@ class VLMResponseParseError(VisionError):
 class SceneObservationValidationError(VisionError):
     """视觉模型 JSON 不符合 SceneObservation 协议。"""
 
+
+class CameraCalibrationError(VisionError):
+    """相机标定配置、样本或求解结果无效。"""
+
+
+class CheckerboardDetectionError(CameraCalibrationError):
+    """图像中未检测到完整、指定规格的棋盘格。"""
+
+
+class InsufficientCalibrationDataError(CameraCalibrationError):
+    """有效且尺寸一致的标定视角不足。"""
+
+
+class HandEyeCalibrationError(CameraCalibrationError):
+    """手眼标定数据、可观测性或求解结果无效。"""

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from rosclaw_mini.vision.exceptions import CameraOpenError, FrameCaptureError
 
 
-CaptureFactory = Callable[[int], Any]
+CameraSource = int | str | Path
+CaptureFactory = Callable[[int | str], Any]
 
 
 def _import_cv2():
@@ -16,7 +18,7 @@ def _import_cv2():
         import cv2
     except (ImportError, OSError) as error:
         raise CameraOpenError(
-            "OpenCV 不可用；请安装 requirements.txt 中的 opencv-python-headless。"
+            "OpenCV 不可用；请安装 requirements.txt 中的 opencv-python。"
         ) from error
     return cv2
 
@@ -26,15 +28,24 @@ class CameraAdapter:
 
     def __init__(
         self,
-        camera_index: int = 0,
+        camera_index: CameraSource = 0,
         *,
         capture_factory: CaptureFactory | None = None,
     ) -> None:
-        if isinstance(camera_index, bool) or not isinstance(camera_index, int):
-            raise ValueError("camera_index 必须是整数。")
-        if camera_index < 0:
-            raise ValueError("camera_index 不能为负数。")
-        self.camera_index = camera_index
+        if isinstance(camera_index, bool):
+            raise ValueError("摄像头来源不能是布尔值。")
+        if isinstance(camera_index, int):
+            if camera_index < 0:
+                raise ValueError("camera_index 不能为负数。")
+            source: int | str = camera_index
+        elif isinstance(camera_index, (str, Path)):
+            path = Path(camera_index)
+            if not path.is_absolute():
+                raise ValueError("camera_device 必须是绝对设备路径。")
+            source = str(path)
+        else:
+            raise ValueError("摄像头来源必须是整数索引或绝对设备路径。")
+        self.camera_index = source
         self._capture_factory = capture_factory
         self._capture = None
 
@@ -104,4 +115,3 @@ class CameraAdapter:
 
     def __exit__(self, _error_type, _error, _traceback) -> None:
         self.close()
-

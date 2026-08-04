@@ -137,6 +137,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="vision 摄像头编号；默认 0。",
     )
     parser.add_argument(
+        "--camera-device",
+        type=Path,
+        default=None,
+        help=(
+            "vision 摄像头绝对设备路径；优先于 --camera-index，"
+            "也可用 ROSCLAW_VISION_CAMERA_DEVICE。"
+        ),
+    )
+    parser.add_argument(
         "--vlm-model",
         default=None,
         help="vision 使用的千问视觉模型；优先于 DASHSCOPE_VL_MODEL。",
@@ -277,9 +286,16 @@ def build_vision_service_from_args(
         api_key=api_key,
         timeout_seconds=args.vision_timeout,
     )
+    camera_device = args.camera_device
+    if camera_device is None:
+        environment_device = environ.get(
+            "ROSCLAW_VISION_CAMERA_DEVICE", ""
+        ).strip()
+        camera_device = Path(environment_device) if environment_device else None
     return service_builder(
         client=client,
         camera_index=args.camera_index,
+        camera_device=camera_device,
         max_width=args.vision_max_width,
     )
 
@@ -657,6 +673,8 @@ def main(
     if args.input_mode == "vision":
         if args.camera_index < 0:
             parser.error("--camera-index 不能为负数")
+        if args.camera_device is not None and not args.camera_device.is_absolute():
+            parser.error("--camera-device 必须是绝对设备路径")
         if args.vision_timeout <= 0:
             parser.error("--vision-timeout 必须大于 0")
         if args.vision_max_width <= 0:
