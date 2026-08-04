@@ -1,8 +1,8 @@
-###此文件定义了知识文档、知识文档分块和检索到的知识文档分块的数据结构。用作为后续的知识检索和处理提供基础数据结构。
-
+"""RAG 知识文档、分块和检索结果的数据结构。"""
 
 from dataclasses import dataclass, field
 from typing import Any
+
 
 @dataclass(frozen=True)
 class KnowledgeDocument:
@@ -28,6 +28,7 @@ class KnowledgeDocument:
     risk_level: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass(frozen=True)
 class KnowledgeChunk:
     """
@@ -45,6 +46,7 @@ class KnowledgeChunk:
     chunk_index: int
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class RetrievedChunk:

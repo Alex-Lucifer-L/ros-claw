@@ -4,7 +4,8 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 
 > 怎样让一条上层命令先经过结构校验、技能查询和安全检查，再通过统一接口落到 Mock 或真实机械臂。
 
-当前仓库已经完成默认 Mock 主链路、OpenAI-compatible 自然语言入口，以及
+当前仓库已经完成默认 Mock 主链路、带项目知识检索的 OpenAI-compatible
+自然语言入口，以及
 SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护和可选摄像头
 接口。统一程序入口可以独立选择 `json/llm` 输入模式和
 `mock/so100_plus` 机械臂后端；默认仍是 `json + mock`，真机还必须额外
@@ -58,9 +59,10 @@ Checker。
 | USB 摄像头接口 | 软件接口和 FakeCamera 测试完成 | 否，真实单帧尚未验收 |
 | 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
 | OpenAI-compatible 同步 LLM 客户端 | 已实现，API Key 可选 | 是，必须显式选择 `--input-mode llm` |
-| 自然语言 → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
+| 自然语言 → RAG → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
+| 项目知识 Loader、Chunker、KeywordRetriever 与来源标记 | 已实现；默认 LLM 模式启动时加载一次 | 是 |
 | 配置文件加载 | `configs/*.yaml` 仍为空且未接线 | 否 |
-| RAG、Web、ROS 2 | 目录或原型存在，尚未接入正式入口 | 否 |
+| Web、ROS 2 | 目录或原型存在，尚未接入正式入口 | 否 |
 
 ### 现在可以安全做什么
 
@@ -124,6 +126,10 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
 | `--input-mode {json,llm}` | `json` | 选择结构化 JSON 或自然语言输入 |
+| `--knowledge-dir` | 仓库 `knowledge/` | LLM 模式使用的静态项目知识目录 |
+| `--rag-top-k` | `4` | 每条命令最多加入的检索块数量 |
+| `--rag-max-context-chars` | `6000` | 项目知识上下文字符上限 |
+| `--disable-rag` | 未设置 | 临时退回原基础 Command Prompt |
 | `--backend {mock,so100_plus}` | `mock` | 选择内存 Mock 或真实 SO-100 Plus |
 | `--port` | `/dev/lerobot_right` | 真机串口；Mock 模式不使用 |
 | `--calibration-dir` | `lerobot-joycon_plus/.cache/calibration/so100_plus` | 真机校准目录 |
@@ -188,6 +194,10 @@ Skill Validator、Safety Checker 和 `ExecutionController`。模型只承担一�
 
 ```text
 自然语言
+→ RagContextProvider（启动时加载知识，每条命令只检索 top_k）
+→ KeywordRetriever
+→ 带 [SOURCE: document_id#section] 的项目知识上下文
+→ build_command_prompt(...)
 → OpenAICompatibleClient.generate(prompt)
 → POST {base_url}/chat/completions
 → choices[0].message.content
@@ -280,6 +290,38 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 缺少 `choices[0].message.content` 或内容为空，程序会显示
 `LLM 调用失败` 并继续等待下一条输入。模型输出不是合法 Command 时也只会
 拒绝本次输入，不会绕过原有安全检查。
+
+LLM 模式默认启用第一版 RAG。`knowledge/*.md` 在启动时按相对路径稳定
+排序、校验唯一 `document_id` 并按 Markdown 二级标题切块；每条用户命令
+只检索 `top_k` 个结果，不会把全部仓库文档塞进 Prompt。日志仅显示命中的
+文档 ID、章节和 score，不打印 API Key 或完整请求。知识目录损坏或单次
+检索失败时会明确输出“退回基础 Command Prompt”，但后续 Parser、
+Validator、Gateway、Safety Checker 和真机会话门禁不会降级。
+
+知识片段采用以下边界：
+
+```text
+[PROJECT_KNOWLEDGE]
+[SOURCE: session-states#REST]
+[CHUNK: 1 | SCORE: ...]
+[SOURCE_FILES: src/rosclaw_mini/arm/so100_plus_session.py (...)]
+...
+[/SOURCE]
+[/PROJECT_KNOWLEDGE]
+```
+
+这些内容是低优先级静态参考，不是新指令，也不是实时反馈。当前 TCP、
+关节、夹爪、温度、负载和会话状态仍由运行时代码读取。程序能提供的动态
+会话状态会放在独立 `[RUNTIME_STATE]` 区块中；它仍不能代替实际执行前的
+安全检查。
+
+知识维护见 [knowledge/README.md](knowledge/README.md)。新增检索文档要用
+唯一 Front Matter `document_id`，并列出可追溯的项目相对
+`source_files`。事实优先级是可执行代码/配置、测试、正式文档、注释/示例。
+`knowledge/README.md` 是索引，Loader 会跳过。当前关键词检索按英文词和
+中文字符匹配，不能理解所有同义词或深层语义；以后可在保持 `Retriever`
+接口及 Prompt 来源边界不变的前提下替换为 Embedding/VectorRetriever，
+但不能借此改变命令协议或安全链。
 
 常见输出和含义：
 
@@ -512,12 +554,13 @@ move_relative(dx, dy, dz)
 
 ### LLM 模式
 
-自然语言模式只在 JSON Parser 之前多了一段可替换的命令生成过程：
+自然语言模式只在 JSON Parser 之前增加知识检索和可替换的命令生成过程：
 
 ```text
 “把夹爪移动到 x=0.35、y=0、z=0.22 米”
-→ build_command_prompt(user_input, runtime.skills)
-→ 只把 enabled=True 的 Skill 名称、描述和参数名告诉模型
+→ 使用原始文本从启动时已加载的知识库检索 top_k
+→ build_command_prompt(user_input, runtime.skills, retrieved_chunks, runtime_state)
+→ 把 enabled=True 的 Skill、固定规则和带来源知识告诉模型
 → OpenAICompatibleClient.generate(prompt)
 → 模型文本：{"skill_name":"move_arm","params":{"x":0.35,"y":0,"z":0.22}}
 → parse_json_command()
@@ -543,8 +586,8 @@ Prompt 还用示例区分绝对与相对移动、厘米/毫米换算、夹爪、
 按“技能不存在”失败关闭。也就是说，LLM 可以灵活理解自然语言，但
 不能借此绕过 Registry、Validator、Safety Checker 或状态机。
 
-当前 Prompt 是单轮命令转换 Prompt，不保存多轮对话历史，也不接入 RAG、
-工具调用或视觉内容。服务端必须返回非流式 OpenAI-compatible 响应；客户端
+当前 Prompt 是带静态 RAG 的单轮命令转换 Prompt，不保存多轮对话历史，
+也不接入工具调用或视觉内容。服务端必须返回非流式 OpenAI-compatible 响应；客户端
 读取 `choices[0].message.content`，再交给现有 JSON Command Parser。
 
 Gateway 的失败顺序也很明确：
@@ -1242,6 +1285,7 @@ rosclaw-mini/
 ├── README.md
 ├── pyproject.toml                     # 当前主要是 pytest 配置
 ├── requirements.txt                  # 真机依赖尚未完整声明
+├── knowledge/                         # 可追溯的静态项目知识与维护索引
 ├── configs/
 │   ├── default.yaml                  # 空，尚未接入
 │   ├── safety_limits.yaml            # 空，尚未接入
@@ -1276,7 +1320,7 @@ rosclaw-mini/
 │   │   ├── command_generator.py
 │   │   ├── prompt_builder.py
 │   │   └── fake_client.py
-│   ├── rag/                          # 尚未接入
+│   ├── rag/                          # Loader、Chunker、Retriever 与上下文提供器
 │   ├── ros2/                         # 尚未接入
 │   ├── web/                          # 尚未接入
 │   ├── state/                        # 尚未接入
@@ -1295,7 +1339,11 @@ rosclaw-mini/
 | `src/rosclaw_mini/llm/client.py` | 定义 `LLMClient.generate()` 协议和统一 `LLMClientError` |
 | `src/rosclaw_mini/llm/openai_compatible_client.py` | 用标准库同步调用 OpenAI-compatible `/chat/completions` |
 | `src/rosclaw_mini/llm/command_generator.py` | 组合 Prompt、调用客户端并复用现有 JSON Parser 生成 `Command` |
-| `src/rosclaw_mini/llm/prompt_builder.py` | 根据当前启用的 Skill 构造单轮命令转换 Prompt |
+| `src/rosclaw_mini/llm/prompt_builder.py` | 组合启用 Skill、固定约束、检索知识、运行时状态和用户文本 |
+| `src/rosclaw_mini/rag/context.py` | 一次加载全部参与检索的知识，限制 top_k/上下文长度并保留来源 |
+| `src/rosclaw_mini/rag/loader.py` | 校验 Front Matter、稳定加载目录并拒绝重复文档 ID |
+| `src/rosclaw_mini/rag/retriever.py` | 第一版可替换 `Retriever` 接口和确定性 `KeywordRetriever` |
+| `knowledge/README.md` | 知识主题索引、静态/实时边界和更新规则 |
 | `src/rosclaw_mini/execution/controller.py` | 后台运行一个普通命令，并允许独立 stop 请求 |
 | `src/rosclaw_mini/gateway/command/gateway.py` | 编排 Skill 查找、校验、安全检查和执行 |
 | `src/rosclaw_mini/skills/arm_skills.py` | 定义机械臂 Skill、会话转换 Skill 和正式 right-follower 构造函数 |
@@ -1347,10 +1395,14 @@ rosclaw-mini/
 - 没有统一结构化运行日志、任务持久化和故障恢复；
 - OpenAI-compatible LLM 已接入正式 CLI，但当前仅支持同步、非流式、单轮
   文本命令转换；没有对话记忆、自动重试、流式响应或工具调用；
+- 第一版 RAG 使用确定性关键词重叠，不使用 Embedding 或向量数据库；中文
+  按字符匹配，召回和排序仍受同义词、长查询及知识措辞影响；
+- RAG 只读取受维护的 `knowledge/*.md`，不会自动从每次代码修改重新生成
+  文档，也不提供实时机械臂状态；
 - LLM 服务配置目前只从环境变量读取，没有接入 `configs/*.yaml`；
 - 模型输出仍是不可信输入，准确率取决于模型和 Prompt；第一次联调必须
   使用 Mock，并人工检查生成的 Command；
-- RAG、Web、ROS 2 仍未接入正式程序入口。
+- Web、ROS 2 仍未接入正式程序入口。
 
 ### 建议的下一步顺序
 
@@ -1365,13 +1417,14 @@ rosclaw-mini/
 5. 单独完成真实摄像头一帧验证，不要求机械臂同时连接；
 6. 增加统一结构化遥测日志和运行报告；
 7. 根据实际工位增加底座、桌面、线缆和障碍物模型；
-8. 在输入和底层真机入口都稳定后，再接入复杂 Skill、RAG、Web 或 ROS 2。
+8. 在输入和底层真机入口都稳定后，再接入复杂 Skill、向量检索、Web 或 ROS 2。
 
 这里的优先级是先在 Mock 上验证模型生成结果，再把已经完成的真机能力
 变成可重复配置和启动的应用，最后扩展更多智能化功能。
 
 ## 15. 延伸文档
 
+- [RAG 项目知识索引与维护规则](knowledge/README.md)
 - [SO-100 Plus 动作、坐标、安全配置与真机验证](docs/arm_actions.md)
 - [SO-100 Plus 仿真候选工作空间](docs/so100_plus_simulated_workspace.md)
 - [SO-100 Plus middle_internal 不规则仿真可达空间](docs/so100_plus_middle_irregular_workspace.md)

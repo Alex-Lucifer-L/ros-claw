@@ -1,4 +1,5 @@
-###此文件定义了知识文档、知识文档分块和检索到的知识文档分块的数据结构。用作为后续的知识检索和处理提供基础数据结构。
+"""按 Markdown 二级标题切分项目知识。"""
+
 from rosclaw_mini.rag.document import (
     KnowledgeChunk,
     KnowledgeDocument,
@@ -40,6 +41,7 @@ def chunk_markdown_document(
                 "version": document.version,
                 "risk_level": document.risk_level,
                 "section": current_section,
+                "document_id": document.document_id,
             }
         )
 

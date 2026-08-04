@@ -10,6 +10,11 @@ from rosclaw_mini.command_schema.commands import Command
 from rosclaw_mini.llm.client import LLMClient, LLMClientError
 from rosclaw_mini.llm.command_generator import CommandGenerator
 from rosclaw_mini.llm.openai_compatible_client import OpenAICompatibleClient
+from rosclaw_mini.rag.context import (
+    DEFAULT_RAG_MAX_CONTEXT_CHARS,
+    DEFAULT_RAG_TOP_K,
+    RagContextProvider,
+)
 from rosclaw_mini.arm.so100_plus_factory import SO100PlusRobotConfig
 from rosclaw_mini.llm.command_parser import parse_json_command
 from rosclaw_mini.runtime import (
@@ -26,6 +31,9 @@ InputFunction = Callable[[str], str]###定义了一个类型别名 InputFunction
 OutputFunction = Callable[[str], None]###定义了一个类型别名 OutputFunction，它表示一个可调用对象（函数或方法），该对象接受一个字符串参数并返回 None。这个类型别名用于表示输出函数的签名，通常用于向用户显示输出信息。
 RuntimeBuilder = Callable[[argparse.Namespace], ArmRuntime]###定义了一个类型别名 RuntimeBuilder，它表示一个可调用对象（函数或方法），该对象接受一个 argparse.Namespace 对象作为参数并返回一个 ArmRuntime 对象。这个类型别名用于表示运行时构建器的签名，通常用于根据命令行参数创建和配置 ArmRuntime 实例。
 LLMClientBuilder = Callable[..., LLMClient]
+RagContextProviderBuilder = Callable[..., RagContextProvider]
+
+DEFAULT_KNOWLEDGE_DIRECTORY = Path(__file__).resolve().parents[2] / "knowledge"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +45,29 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("json", "llm"),
         default="json",
         help="输入模式；默认 json，llm 使用 OpenAI-compatible 服务。",
+    )
+    parser.add_argument(
+        "--knowledge-dir",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_DIRECTORY,
+        help="RAG 项目知识目录；只在 llm 模式使用。",
+    )
+    parser.add_argument(
+        "--rag-top-k",
+        type=int,
+        default=DEFAULT_RAG_TOP_K,
+        help="每条自然语言命令最多检索的项目知识块数量。",
+    )
+    parser.add_argument(
+        "--rag-max-context-chars",
+        type=int,
+        default=DEFAULT_RAG_MAX_CONTEXT_CHARS,
+        help="加入 LLM Prompt 的项目知识最大字符数。",
+    )
+    parser.add_argument(
+        "--disable-rag",
+        action="store_true",
+        help="LLM 模式临时只使用基础 Prompt，不加载项目知识。",
     )
     parser.add_argument(
         "--backend",
@@ -118,6 +149,27 @@ def build_llm_client_from_environment(
         model=model,
         api_key=api_key,
     )
+
+
+def build_rag_context_provider(
+    *,
+    knowledge_directory: Path,
+    top_k: int,
+) -> RagContextProvider:
+    """一次加载项目知识目录；不会访问网络或机械臂。"""
+
+    return RagContextProvider.from_directory(
+        knowledge_directory,
+        top_k=top_k,
+    )
+
+
+def _runtime_state_for_prompt(runtime: ArmRuntime, backend: str) -> str:
+    session_state = getattr(runtime, "session_state", None)
+    if session_state is None:
+        return f"backend={backend}; session_state=NOT_APPLICABLE"
+    state_value = getattr(session_state, "value", str(session_state))
+    return f"backend={backend}; session_state={state_value}"
 
 def dispatch_command(
     runtime: ArmRuntime,
@@ -242,10 +294,17 @@ def main(
     output_func: OutputFunction = print,
     runtime_builder: RuntimeBuilder = build_runtime_from_args,
     llm_client_builder: LLMClientBuilder = OpenAICompatibleClient,
+    rag_context_provider_builder: RagContextProviderBuilder = (
+        build_rag_context_provider
+    ),
     environ: Mapping[str, str] | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.rag_top_k <= 0:
+        parser.error("--rag-top-k 必须大于 0")
+    if args.rag_max_context_chars < 128:
+        parser.error("--rag-max-context-chars 不能小于 128")
     if (
         args.backend == "so100_plus"
         and not args.acknowledge_so100_plus_risk
@@ -256,6 +315,7 @@ def main(
         )
 
     llm_client: LLMClient | None = None
+    rag_context_provider: RagContextProvider | None = None
     if args.input_mode == "llm":
         try:
             llm_client = build_llm_client_from_environment(
@@ -265,6 +325,17 @@ def main(
         except (ValueError, LLMClientError) as error:
             output_func(f"LLM 配置错误: {error}")
             return 2
+        if not args.disable_rag:
+            try:
+                rag_context_provider = rag_context_provider_builder(
+                    knowledge_directory=args.knowledge_dir,
+                    top_k=args.rag_top_k,
+                )
+            except Exception as error:
+                output_func(
+                    "RAG 初始化失败，已退回基础 Command Prompt："
+                    f"{error}"
+                )
 
     try:
         runtime = runtime_builder(args)
@@ -304,6 +375,12 @@ def main(
             generator = CommandGenerator(
                 client=llm_client,
                 skills=runtime.skills,
+                context_provider=rag_context_provider,
+                runtime_state_provider=lambda: _runtime_state_for_prompt(
+                    runtime, args.backend
+                ),
+                event_handler=output_func,
+                max_context_chars=args.rag_max_context_chars,
             )
             run_llm_command_loop(
                 runtime,

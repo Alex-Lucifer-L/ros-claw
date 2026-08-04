@@ -15,6 +15,7 @@ from rosclaw_mini.arm.so100_plus_session import ArmSessionState
 from rosclaw_mini.command_schema.commands import ExecutionResult
 from rosclaw_mini.execution.controller import ExecutionController
 from rosclaw_mini.llm.fake_client import FakeLLMClient
+from rosclaw_mini.rag.document import KnowledgeChunk, RetrievedChunk
 from rosclaw_mini.runtime import ArmRuntimeShutdownError, build_mock_runtime
 
 
@@ -232,6 +233,113 @@ def test_main_llm_mode_runs_natural_language_through_mock_runtime():
     assert exit_code == 0
     assert runtime.adapter.gripper_is_open is True
     assert any("open_gripper" in message for message in outputs)
+
+
+def test_main_llm_mode_initializes_rag_once_and_uses_its_context():
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    prompts: list[str] = []
+    builder_calls: list[dict] = []
+
+    class RecordingClient:
+        def generate(self, prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"skill_name":"open_gripper","params":{}}'
+
+    class FakeContextProvider:
+        def retrieve(self, _query: str):
+            return [
+                RetrievedChunk(
+                    chunk=KnowledgeChunk(
+                        chunk_id="gripper-0",
+                        document_id="gripper",
+                        chunk_index=0,
+                        content="open_gripper 无参数。",
+                        metadata={"section": "Open"},
+                    ),
+                    score=1.0,
+                )
+            ]
+
+    provider = FakeContextProvider()
+
+    def rag_builder(**kwargs):
+        builder_calls.append(kwargs)
+        return provider
+
+    input_count = 0
+
+    def input_command(_prompt):
+        nonlocal input_count
+        input_count += 1
+        if input_count == 1:
+            return "请打开夹爪"
+        assert runtime.controller.wait(timeout=1.0) is not None
+        return "exit"
+
+    exit_code = main(
+        ["--input-mode", "llm", "--rag-top-k", "2"],
+        input_func=input_command,
+        output_func=lambda _message: None,
+        runtime_builder=lambda _args: runtime,
+        llm_client_builder=lambda **_kwargs: RecordingClient(),
+        rag_context_provider_builder=rag_builder,
+        environ={
+            "ROSCLAW_LLM_BASE_URL": "http://localhost:11434/v1",
+            "ROSCLAW_LLM_MODEL": "local-model",
+        },
+    )
+
+    assert exit_code == 0
+    assert len(builder_calls) == 1
+    assert builder_calls[0]["top_k"] == 2
+    assert len(prompts) == 1
+    assert "[SOURCE: gripper#Open]" in prompts[0]
+    assert "backend=mock; session_state=NOT_APPLICABLE" in prompts[0]
+
+
+def test_main_rag_initialization_failure_falls_back_to_base_prompt():
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    outputs: list[str] = []
+    prompts: list[str] = []
+
+    class RecordingClient:
+        def generate(self, prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"skill_name":"open_gripper","params":{}}'
+
+    def broken_rag_builder(**_kwargs):
+        raise ValueError("broken metadata")
+
+    input_count = 0
+
+    def input_command(_prompt):
+        nonlocal input_count
+        input_count += 1
+        if input_count == 1:
+            return "请打开夹爪"
+        assert runtime.controller.wait(timeout=1.0) is not None
+        return "exit"
+
+    exit_code = main(
+        ["--input-mode", "llm"],
+        input_func=input_command,
+        output_func=outputs.append,
+        runtime_builder=lambda _args: runtime,
+        llm_client_builder=lambda **_kwargs: RecordingClient(),
+        rag_context_provider_builder=broken_rag_builder,
+        environ={
+            "ROSCLAW_LLM_BASE_URL": "http://localhost:11434/v1",
+            "ROSCLAW_LLM_MODEL": "local-model",
+        },
+    )
+
+    assert exit_code == 0
+    assert any(
+        "RAG 初始化失败" in message and "broken metadata" in message
+        for message in outputs
+    )
+    assert len(prompts) == 1
+    assert "PROJECT_KNOWLEDGE" not in prompts[0]
 
 
 def test_main_rejects_real_backend_without_risk_acknowledgement():

@@ -1,5 +1,6 @@
 import re
 from collections.abc import Sequence
+from typing import Protocol
 
 from rosclaw_mini.rag.document import (
     KnowledgeChunk,
@@ -10,6 +11,16 @@ from rosclaw_mini.rag.document import (
 TOKEN_PATTERN = re.compile(
     r"[a-zA-Z0-9_]+|[\u4e00-\u9fff]"
 )
+
+
+class Retriever(Protocol):
+    """可替换的检索器最小接口；第一版实现为关键词检索。"""
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 3,
+    ) -> list[RetrievedChunk]: ...
 
 
 def _tokenize(text: str) -> set[str]:
@@ -75,6 +86,7 @@ class KeywordRetriever:
         results.sort(
             key=lambda result: (
                 -result.score,
+                result.chunk.document_id,
                 result.chunk.chunk_index,
             )
         )
