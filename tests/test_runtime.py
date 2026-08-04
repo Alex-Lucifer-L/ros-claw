@@ -10,7 +10,11 @@ from rosclaw_mini.arm.kinematics import (
     SO100PlusKinematics,
 )
 from rosclaw_mini.arm.so100_plus import SO100_PLUS_REAL_HARDWARE_PROFILE
-from rosclaw_mini.arm.so100_plus_session import ArmSessionState
+from rosclaw_mini.arm.so100_plus_session import (
+    ArmSessionState,
+    SO100_PLUS_MIDDLE_INTERNAL_RADIANS,
+    SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
+)
 from rosclaw_mini.arm.so100_plus_trajectory_validation import (
     SO100PlusTrajectoryValidationUnavailableError,
 )
@@ -458,6 +462,29 @@ def test_so100_plus_runtime_requires_risk_ack_before_factory_call():
     assert factory_called is False
 
 
+def test_irregular_workspace_failure_happens_before_robot_factory(tmp_path):
+    config = _certified_robot_config(tmp_path)
+    robot_factory_called = False
+
+    def forbidden_robot_factory(_config):
+        nonlocal robot_factory_called
+        robot_factory_called = True
+        raise AssertionError("网格失败时不应创建 Robot")
+
+    def unavailable_workspace():
+        raise RuntimeError("模拟不规则工作空间网格不可用")
+
+    with pytest.raises(RuntimeError, match="网格不可用"):
+        build_so100_plus_runtime(
+            config,
+            risk_acknowledged=True,
+            robot_factory=forbidden_robot_factory,
+            irregular_workspace_factory=unavailable_workspace,
+        )
+
+    assert robot_factory_called is False
+
+
 def test_so100_plus_runtime_rejects_unregistered_follower_before_factory_call():
     factory_called = False
 
@@ -508,12 +535,10 @@ class FakeKinematics:
     def __init__(
         self,
         current_tcp_position_m: tuple[float, float, float] = (
-            0.35,
-            0.0,
-            0.22,
+            SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M
         ),
         current_joint_radians: tuple[float, ...] = (
-            SO100_PLUS_JOYCON_INITIAL_RADIANS
+            SO100_PLUS_MIDDLE_INTERNAL_RADIANS
         ),
     ) -> None:
         self.driver_inputs: list[tuple[float, ...]] = []
@@ -572,6 +597,7 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
     kinematics = FakeKinematics()
     adapters: list[FakeSO100PlusAdapter] = []
     motion_inputs: list[tuple[float, ...]] = []
+    motion_workspaces = []
     motion_limits = object()
     skills = None
     skill_adapter = None
@@ -585,8 +611,9 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
         adapters.append(adapter)
         return adapter
 
-    def motion_limits_builder(current_joint_radians):
+    def motion_limits_builder(current_joint_radians, *, workspace):
         motion_inputs.append(tuple(current_joint_radians))
+        motion_workspaces.append(workspace)
         return motion_limits
 
     def skill_builder(adapter):
@@ -612,15 +639,28 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
     assert skill_adapter is runtime.adapter
     assert runtime.skills is not skills
     assert runtime.skills["move_arm"].enabled is True
-    assert {"unfold_arm", "fold_arm"} <= runtime.skills.keys()
+    assert {"unfold_arm", "fold_arm", "revalidate_state"} <= (
+        runtime.skills.keys()
+    )
+    assert runtime.skills["revalidate_state"].risk_level == "low"
+    assert runtime.skills["revalidate_state"].params_schema == {}
     assert runtime.session_state is ArmSessionState.WORK
-    assert runtime.current_tcp_position_m == (0.35, 0.0, 0.22)
+    assert runtime.current_tcp_position_m == (
+        SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M
+    )
     assert runtime.move_arm_disabled_reason is None
     assert kinematics.driver_inputs == [
         (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)
     ]
     assert SO100_PLUS_JOYCON_INITIAL_RADIANS in kinematics.forward_inputs
-    assert motion_inputs == [SO100_PLUS_JOYCON_INITIAL_RADIANS]
+    assert motion_inputs == [SO100_PLUS_MIDDLE_INTERNAL_RADIANS]
+    assert motion_workspaces == [runtime.session.work_planning_envelope]
+    assert runtime.skills["move_arm"].params_schema["x"].max_value == (
+        runtime.session.work_workspace_aabb.x.maximum
+    )
+    assert runtime.skills["move_arm"].params_schema["y"].min_value == (
+        runtime.session.work_workspace_aabb.y.minimum
+    )
     assert adapters[1].kwargs["kinematics"] is kinematics
     assert adapters[1].kwargs["motion_limits"] is motion_limits
     assert adapters[1].kwargs["motion_config"] is not None
@@ -668,7 +708,9 @@ def test_so100_plus_runtime_recognizes_storage_feedback_as_rest(tmp_path):
 
     assert runtime.session_state is ArmSessionState.REST
     assert runtime.move_arm_disabled_reason is None
-    assert {"unfold_arm", "fold_arm"} <= runtime.skills.keys()
+    assert {"unfold_arm", "fold_arm", "revalidate_state"} <= (
+        runtime.skills.keys()
+    )
 
     command = Command(
         command_id="rest-rejects-move",
@@ -765,10 +807,10 @@ def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertifi
 ):
     config = _certified_robot_config(tmp_path)
     robot = FakeRobot()
-    current_joints = list(SO100_PLUS_JOYCON_INITIAL_RADIANS)
+    current_joints = list(SO100_PLUS_MIDDLE_INTERNAL_RADIANS)
     current_joints[2] += math.radians(6.0)
     kinematics = FakeKinematics(
-        current_tcp_position_m=(0.35, 0.0, 0.22),
+        current_tcp_position_m=SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
         current_joint_radians=tuple(current_joints),
     )
     adapters: list[FakeSO100PlusAdapter] = []
@@ -791,7 +833,7 @@ def test_so100_plus_runtime_disables_move_arm_when_tcp_inside_but_pose_uncertifi
     assert runtime.skills["move_arm"].enabled is True
     assert runtime.session_state is ArmSessionState.UNVERIFIED
     assert runtime.move_arm_disabled_reason is not None
-    assert "JoyCon 初始工作姿态" in (
+    assert "middle_internal WORK 姿态" in (
         runtime.move_arm_disabled_reason
     )
     assert "ellbow_joint" in runtime.move_arm_disabled_reason
@@ -824,10 +866,10 @@ def test_so100_plus_runtime_rejects_full_turn_joint_aliases(
 ):
     config = _certified_robot_config(tmp_path)
     robot = FakeRobot()
-    current_joints = list(SO100_PLUS_JOYCON_INITIAL_RADIANS)
+    current_joints = list(SO100_PLUS_MIDDLE_INTERNAL_RADIANS)
     current_joints[5] += full_turn_offset
     kinematics = FakeKinematics(
-        current_tcp_position_m=(0.35, 0.0, 0.22),
+        current_tcp_position_m=SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
         current_joint_radians=tuple(current_joints),
     )
     adapters: list[FakeSO100PlusAdapter] = []

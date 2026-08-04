@@ -129,6 +129,42 @@ def test_prompt_distinguishes_absolute_and_relative_motion() -> None:
     runtime.shutdown()
 
 
+def test_prompt_maps_state_revalidation_without_implying_motion() -> None:
+    skill = SkillDefinition(
+        skill_name="revalidate_state",
+        description=(
+            "只读取真实反馈并重新认证会话状态，不产生运动"
+        ),
+        risk_level="low",
+        enabled=True,
+        params_schema={},
+        handler=lambda command: command,
+    )
+
+    prompt = build_command_prompt(
+        user_input="恢复work状态",
+        skills={"revalidate_state": skill},
+    )
+
+    assert "revalidate_state" in prompt
+    assert "只读取反馈" in prompt
+    assert "不产生运动" in prompt
+    assert "回到或恢复 WORK 状态" in prompt
+    assert "不能用来表达实际移动到某个姿态" in prompt
+
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response=(
+                '{"skill_name":"revalidate_state","params":{}}'
+            )
+        ),
+        skills={"revalidate_state": skill},
+    )
+    command = generator.generate("恢复work状态")
+    assert command.skill_name == "revalidate_state"
+    assert command.params == {}
+
+
 def test_fake_llm_generates_two_centimeter_upward_relative_command() -> None:
     runtime = build_mock_runtime(move_duration_seconds=0.0)
     generator = CommandGenerator(

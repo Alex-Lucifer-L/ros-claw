@@ -163,9 +163,21 @@ def bind_so100_plus_arm_session(
             + "。"
         )
     skills = dict(skills)
+    workspace = getattr(
+        session,
+        "work_workspace_aabb",
+        SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+    )
     skills["move_arm"] = replace(
         skills["move_arm"],
         handler=session.move_arm,
+        # Gateway 这里只做不规则点集 AABB 粗筛；会话 Handler 会继续检查
+        # 完整网格单元，AABB 内的空洞不会因此被放行。
+        params_schema={
+            "x": _position_param_spec(workspace.x),
+            "y": _position_param_spec(workspace.y),
+            "z": _position_param_spec(workspace.z),
+        },
     )
     skills["move_relative"] = replace(
         skills["move_relative"],
@@ -187,7 +199,8 @@ def bind_so100_plus_arm_session(
         skill_name="unfold_arm",
         description=(
             "沿已认证的 follower_rest → storage_escape → "
-            "JoyCon 工作初始姿态路径展开机械臂"
+            "JoyCon 初始转换姿态 → near_internal → middle_internal "
+            "路径展开到正式 WORK"
         ),
         risk_level="high",
         enabled=True,
@@ -197,12 +210,24 @@ def bind_so100_plus_arm_session(
     skills["fold_arm"] = SkillDefinition(
         skill_name="fold_arm",
         description=(
-            "先返回 JoyCon 工作初始姿态，再沿已认证反向路径"
-            "收纳到 follower_rest"
+            "先返回 middle_internal，再沿 near_internal → JoyCon "
+            "初始转换姿态 → storage_escape 的已认证反向路径收纳"
         ),
         risk_level="high",
         enabled=True,
         params_schema={},
         handler=session.fold_arm,
+    )
+    skills["revalidate_state"] = SkillDefinition(
+        skill_name="revalidate_state",
+        description=(
+            "不产生运动；在 UNVERIFIED 状态下重新读取真实反馈，"
+            "姿态符合 follower_rest 时恢复 REST；实际 TCP 在正式"
+            "工作空间且通过关节、夹爪和 MuJoCo 静态门禁时恢复 WORK"
+        ),
+        risk_level="low",
+        enabled=True,
+        params_schema={},
+        handler=session.revalidate_state,
     )
     return skills

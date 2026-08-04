@@ -53,7 +53,7 @@ Checker。
 | `MockArmAdapter` | 已实现 | 是，默认后端 |
 | `SO100PlusAdapter` | 已实现并经过真机验证 | 是，必须显式选择真机并确认风险 |
 | SO-100 Plus FK、IK、TCP、会话状态和受控转换轨迹 | 已实现；转换路径仍需现场复验 | 是，由真机运行时装配 |
-| 当前 `right_follower` 正式工作空间 | 已登记 `12 × 6 × 12 cm` 固定姿态可达长方体 | 可通过专用 Skill 构造函数使用 |
+| 当前 `right_follower` WORK 空间 | 已接入 10 mm 网格的不规则 MuJoCo 可达集；旧 `12 × 6 × 12 cm` 是有真机代表点记录的核心区 | 是，只由 SO-100 Plus 会话门禁使用 |
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
 | USB 摄像头接口 | 软件接口和 FakeCamera 测试完成 | 否，真实单帧尚未验收 |
 | 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
@@ -336,10 +336,14 @@ REST
 ```
 
 `unfold_arm` 会从当次实际读取且通过容差检查的 `follower_rest` 关节角
-规划 `follower_rest → storage_escape → JoyCon 工作初始姿态`。整条
-关节轨迹必须先通过生产模块中的 MuJoCo 碰撞、接触、TCP 方向和关节限制
-预检查，全部通过后才会发送第一个运动目标；Adapter 执行的是刚刚通过
-验证的同一组 `JointMotionPlan`。30 Hz 余弦缓入缓出所需的
+规划固定顺序 `follower_rest → storage_escape → JoyCon 初始转换点
+→ near_internal → middle_internal`。JoyCon 点是收纳通道与工作区
+入口之间的受控转换端点，不是 `WORK`；`middle_internal` 是
+不规则 WORK 空间的固定参考点和中心通道节点，到达并通过 TCP 和
+关节姿态门禁后才进入 `WORK`。整条关节轨迹必须先通过生产模块中的
+MuJoCo 碰撞、接触、TCP 方向和关节限制预检查，全部通过后才会
+发送第一个运动目标；Adapter 执行的是刚刚通过验证的同一组
+`JointMotionPlan`。30 Hz 余弦缓入缓出所需的
 最终执行点会在 MuJoCo 预检前一次性固化；预检逐点使用它们，
 执行器随后按原数量、原顺序和原数值写入，执行期间不再规划或插值。
 转换预检还会读取已校准的 `gripper_joint` 实测角，按 MuJoCo 中
@@ -347,18 +351,28 @@ REST
 缺失、非有限、超出模型范围或执行期间偏离都会失败关闭；程序不会
 为通过门禁而自动开合夹爪。
 
-`fold_arm` 会读取当前实际 WORK 姿态，规划并逐点验证返回 JoyCon 工作
-初始姿态的完整轨迹。实际反馈再次通过工作初始姿态门禁后，才会规划、
-验证并执行 `工作初始姿态 → storage_escape → follower_rest`。工作初始点
-的 X 比正式工作框下限小约 1 cm，它只对这两个固定状态转换开放；普通
-`move_arm` 的正式 `12 × 6 × 12 cm` 工作空间没有扩大。
+`fold_arm` 会读取当前实际 WORK 姿态，规划并逐点验证
+`当前位置 → middle_internal → near_internal → JoyCon 初始转换点`，
+然后复核 JoyCon 点的实际反馈，再执行已预检的
+`JoyCon 初始转换点 → storage_escape → follower_rest`。JoyCon 点的
+X 比旧真机核心区下限小约 1 cm，它只对固定状态转换开放，仍不是
+普通 `move_arm` 目标。
 
 如果启动姿态为 `REST`，会话正常启动，但只允许 `unfold_arm` 和
 `stop`；如果为 `WORK`，才允许普通工作区运动和 `fold_arm`；如果为
-`UNVERIFIED`，所有运动失败关闭。工作初始姿态仍采用原真机验收脚本
-`MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 的启动门槛，不代表六关节任意
+`UNVERIFIED`，所有运动失败关闭。`middle_internal` WORK 姿态复用原真机
+验收脚本 `MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0` 的启动门槛，不代表六关节任意
 `±5°` 组合都已经过真机验证。MuJoCo、模型或认证配置不可用时同样失败
 关闭，不会跳过轨迹检查。
+
+展开或收纳若只是最终到位/稳定超差，程序会立即再读真实反馈和
+夹爪保持状态。若完整 follower_rest 或 `middle_internal` 门禁仍然通过，
+会话自动恢复 `REST/WORK`，但本次结果仍然报失败，也不会自动再动一次。
+过载、过温、流式跟踪超限、通信、越界、夹爪异常和 `stop` 仍然进入
+`UNVERIFIED`，不自动恢复或重试。进入 `UNVERIFIED` 后可以显式执行
+只读 `revalidate_state`：它不会移动机械臂；实际姿态若符合
+follower_rest 就恢复 `REST`，若 TCP 位于登记的不规则网格单元、六关节及
+底座范围合法、实际夹爪可映射且 MuJoCo 静态姿态无接触，则恢复 `WORK`。
 
 输入 `exit`、输入结束或按下 Ctrl+C 时，运行时会：
 
@@ -490,8 +504,9 @@ flowchart TD
 move_relative(dx, dy, dz)
 → 执行时读取 current_tcp
 → target = current_tcp + (dx, dy, dz)
-→ 检查最终绝对目标的正式工作空间
+→ 检查最终绝对目标是否位于不规则网格的有效节点/完整单元
 → 复用 move_arm 的 IK、关节限制、MuJoCo 轨迹预检、运行保护和 stop
+→ 动作后重新读取真实 TCP 并复核仍在登记不规则空间内
 → ExecutionResult
 ```
 
@@ -585,12 +600,13 @@ controller.submit(move_command)
 `disable_torque` 默认禁用的是 Gateway/普通命令入口，不是删除 Adapter 的卸力能力。受控维护流程仍可直接调用 Adapter；普通卸力必须先验证机械臂处于 `follower_rest`。
 
 真机运行时调用 `bind_so100_plus_arm_session()` 后，还会注册两个不接受
-用户路径参数的固定转换 Skill：
+用户路径参数的固定转换 Skill，以及一个只读状态重新认证 Skill：
 
 | Skill | 风险等级 | 参数 | 固定路径 |
 | --- | --- | --- | --- |
-| `unfold_arm` | `high` | `{}` | `follower_rest → storage_escape → JoyCon 工作初始姿态` |
-| `fold_arm` | `high` | `{}` | 先回工作初始姿态，再经 `storage_escape → follower_rest` |
+| `unfold_arm` | `high` | `{}` | `follower_rest → storage_escape → JoyCon 转换点 → near_internal → middle_internal (WORK)` |
+| `fold_arm` | `high` | `{}` | 按 `middle_internal → near_internal → JoyCon 转换点 → storage_escape → follower_rest` 退出 |
+| `revalidate_state` | `low` | `{}` | 只读反馈；对 follower_rest 恢复 REST，或对通过工作框、关节、夹爪和 MuJoCo 静态门禁的实际姿态恢复 WORK；绝不发送运动目标 |
 
 它们的中间姿态、目标关节角、速度和安全限制不能通过 JSON 或自然语言
 覆盖。会话状态的放行规则是：
@@ -600,7 +616,7 @@ controller.submit(move_command)
 | `REST` | `unfold_arm`、`stop` |
 | `TRANSITION` | 仅 `stop` |
 | `WORK` | `move_arm`、`move_relative`、`fold_arm`、`open_gripper`、`close_gripper`、`stop` |
-| `UNVERIFIED` | 仅 `stop` 和安全退出；拒绝所有产生运动的 Skill |
+| `UNVERIFIED` | `stop`、只读 `revalidate_state` 和安全退出；拒绝所有产生运动的 Skill |
 
 LLM 模式也使用同一份运行时 Skill Registry，所以状态门禁不会因输入方式
 改变。Prompt 中“出现了某个 Skill”也不等于该动作已经通过最终安全检查。
@@ -744,18 +760,22 @@ LLM 自然语言入口额外采用一个固定观察约定，避免同一个模�
 - 它们是基座坐标系中的位移量，`dz > 0` 表示向上；
 - 当前 TCP 在命令真正开始执行时读取，不使用启动缓存或 LLM
   猜测值；
-- 计算出的最终绝对目标必须位于同一正式工作空间，然后走
+- 计算出的最终绝对目标必须位于同一不规则 WORK 空间，然后走
   `move_arm` 相同的 IK、轨迹预检、执行保护和 `stop` 链路；
 - 真机会话只在 `WORK` 状态放行；`REST`、`TRANSITION` 和
   `UNVERIFIED` 都会拒绝。
 - `move_arm/move_relative` 若在任何 waypoint 写入后失败或被中断，
   会话立即转为 `UNVERIFIED`；规划、工作空间或 MuJoCo 预检在
   零运动时失败则保持原 `WORK` 状态。
+- 动作完成后再读真实 TCP；成功结果分别显示计划目标和真实
+  到达位置。计划目标合法但真实 TCP 越界也会失败并转为
+  `UNVERIFIED`。
 
 例如当前 TCP 为 `(0.35, -0.01, 0.24) m`，执行
 `move_relative(0, 0, 0.02)` 的最终目标是
 `(0.35, -0.01, 0.26) m`。如果最终目标越界，失败结果会同时列出
 当前 TCP、请求位移、计算目标和违反的轴范围，且不会下发运动。
+错误还会列出当前 TCP 下 `dx/dy/dz` 各自可用的位移区间。
 
 ### 当前姿态策略
 
@@ -798,9 +818,45 @@ LLM 自然语言入口额外采用一个固定观察约定，避免同一个模�
 
 这些软件保护不能代替物理急停、断电、现场清障和人工看护。
 
-### 正式固定姿态工作空间
+### 运行时不规则 WORK 空间
 
-当前 `right_follower` 登记的 TCP 三轴闭区间为：
+当前 `right_follower` 统一入口使用的不是一个 XYZ 长方体，而是从
+`middle_internal` 出发离线扫描得到的 10 mm 三维网格：
+
+- 扫描了 `62,092` 个网格点；
+- `10,974` 个点同时通过两个登记夹爪姿态、IK、关节限制以及
+  `middle_internal → 目标` 整条路径的 MuJoCo 碰撞/接触检查；
+- `9,044` 个网格单元的 8 个角点全部有效，因此这些完整单元内可接受
+  连续 TCP 目标；
+- 网格外包围盒仅为粗筛范围：
+
+```text
+X:  0.1735714232672181 .. 0.5235714232672181 m
+Y: -0.1611854942801636 .. 0.0988145057198364 m
+Z:  0.0393284828899005 .. 0.3793284828899005 m
+```
+
+包围盒内仍有不可达空洞和未验证边界，所以代码不会把这三组最小/最大值
+当成可自由移动的长方体。只有精确有效节点，或所在网格单元的所有必要
+角点都有效时，目标才能通过第一道门禁。运动还会经过：
+
+```text
+实际当前关节 → middle_internal 参考关节 → 目标关节
+→ 固化最终 30 Hz waypoints
+→ 对同一组 waypoints 做 MuJoCo 全轨迹检查
+→ 原样执行同一组 waypoints
+```
+
+精确网格点使用扫描产物中保存的六关节解；完整单元内的连续点从
+`middle_internal` 重新求 IK。两者都会在发送任何电机目标前验证整条最终轨迹。
+网格文件路径、SHA-256、参考姿态、点数、步长或夹爪交集配置不匹配时，
+运行时会在创建 Robot 之前失败关闭。
+
+#### 旧 `12 × 6 × 12 cm` 真机代表点核心区
+
+以下长方体仍保留在 `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS`，作为历史
+真机代表点验收记录和兼容性限制；它不再代表统一真机会话的全部
+可命令空间：
 
 ```text
 X:  0.3135714232672181 .. 0.4335714232672181 m
@@ -808,26 +864,32 @@ Y: -0.041185494280163625 .. 0.018814505719836373 m
 Z:  0.17932848288990053 .. 0.29932848288990055 m
 ```
 
-尺寸约为 `12 × 6 × 12 cm`，代码唯一来源是：
+14 个内缩边界代表点已执行过真机运动：12 个点满足 `12 mm` 到位门槛；
+`X` 最大面中心误差约 `24.800 mm`，`X/Y/Z` 最大角误差约
+`14.780 mm`；14 个点都未出现路径、负载或温度异常。
 
-```python
-SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
-```
+#### 不规则空间首组六方向真机验收
 
-这个范围来自 `14 × 8 × 14 cm` 仿真候选框六面各内缩一个 `1 cm` 网格。14 个内缩边界代表点已经全部执行真机运动：
+2026-08-02 在当前 `right_follower` 和固定工位上，从
+`middle_internal` 中心通道验证了六个不规则网格代表节点：
 
-- 12 个点满足 `12 mm` 到位门槛；
-- `X` 最大面中心误差约 `24.800 mm`；
-- `X/Y/Z` 最大角误差约 `14.780 mm`；
-- 14 个点均未出现路径、负载或温度异常。
+| 方向 | 计划目标 (m) | 实际 TCP 误差 |
+| --- | --- | ---: |
+| X− | `(0.303571, -0.011185, 0.239328)` | 约 `4.8 mm` |
+| X+ | `(0.443571, -0.011185, 0.239328)` | 约 `5.4 mm` |
+| Y− | `(0.373571, -0.051185, 0.239328)` | 约 `6.3 mm` |
+| Y+ | `(0.373571, 0.028815, 0.239328)` | 约 `6.1 mm` |
+| Z− | `(0.373571, -0.011185, 0.169328)` | 约 `3.7 mm` |
+| Z+ | `(0.373571, -0.011185, 0.309328)` | 约 `1.1 mm` |
 
-所以这里的“正式”含义是：项目允许把该长方体作为当前工位的可达目标范围；它不表示范围内每一点都保证 `12 mm` 定位精度。
+六个点均通过完整 MuJoCo 轨迹预检、原样 waypoint 执行、真实
+WORK 姿态复核，且未观察到碰撞、过载、过温或通信异常。
+本轮最后完成 `WORK → middle_internal → fold_arm → REST`，
+退出时关闭力矩并断开连接。这是六方向代表点验收，不表示
+`10,974` 个仿真有效节点均已逐点真机测试。
 
-统一真机入口把工作空间和认证启动关节姿态共同作为启动门禁。只有当前
-TCP 在范围内，并且关节姿态满足真机验收采用的 `5°` 启动门槛，
-`move_arm` 才启用。任一条件失败时，即使目标点本身位于长方体内，命令
-也不会到达 Adapter。这个门禁只约束统一 JSON 链路；直接调用 Adapter
-的本地维护代码仍由调用者承担前置姿态检查责任。
+统一真机入口仍要求会话从通过启动姿态门禁的 `middle_internal` 进入
+`WORK`，而不会因为任意 TCP 恰好落在不规则网格中就认证启动姿态。
 
 这里的 `5°` 来自原验收脚本 `MAX_INITIAL_JOINT_ERROR_DEGREES = 5.0`。
 运行时直接比较每个真实关节角的 `abs(actual - expected)`，不进行 `2π`
@@ -841,7 +903,7 @@ TCP 在范围内，并且关节姿态满足真机验收采用的 `5°` 启动门
 - 当前底座和线缆布置；
 - 桌面与底座底部齐平，TCP 不低于底部平面；
 - 工作区内没有新增障碍物；
-- JoyCon 初始 TCP 姿态附近，并由 `move_to()` 保持当前姿态。
+- `middle_internal` 固定末端方向；当前扫描不是任意 roll/pitch/yaw 的姿态空间。
 
 它不是任意夹爪姿态、任意机械臂或任意工位的全局工作空间。
 
@@ -861,7 +923,11 @@ LeRobot 校准后驱动角：[-19.599609°, 31.201172°]
 build_so100_plus_right_follower_motion_limits(current_joint_radians)
 ```
 
-它组合正式 TCP 工作空间、实测底座范围、第三方模型范围和默认 `2°` 规划内部关节步长。这个 `2°` 是路径被检查时的内部离散步长，不是整次动作最多只能转两度；实际动作可以跨越多个内部步。
+在统一真机运行时，它组合的 `workspace` 是不规则扫描的数值规划
+外包络，只用于让 IK/路径规划表达中心通道；目标是否放行仍由不规则
+网格单元决定。它同时组合实测底座范围、第三方模型范围和默认
+`2°` 规划内部关节步长。这个 `2°` 是路径被检查时的内部离散步长，
+不是整次动作最多只能转两度。
 
 ### 已保存的真机运行配置
 
@@ -876,10 +942,11 @@ build_so100_plus_right_follower_motion_limits(current_joint_radians)
 | 运行时加速度 | 35 | RAM 参数，不改校准 |
 | 流式频率 | 30 Hz | 轨迹目标下发频率 |
 | 最大关节速度 | 12°/s | 首次 LLM 相对运动出现跟踪滞后后降低的流式计划速度 |
-| 流式跟踪误差 | 5° | 超限时停止剩余轨迹 |
+| 流式跟踪记录线 | 5° | 记录教学机械臂的普通动态滞后，不阻断轨迹 |
+| 流式紧急跟踪线 | 8° | 超过时暂停后续 waypoint，根据真实关节反馈等待追赶 |
 | 遥测间隔 | 0.25 s | 记录运行状态 |
-| 最终关节容差 | 3° | 六关节到位门槛 |
-| 最终 TCP 容差 | 12 mm | FK 复算到位门槛 |
+| 最终关节/下一段起点容差 | 5° | 允许教学机械臂的稳态关节偏差；超过仍停止 |
+| TCP 精度参考线 | 12 mm | 记录计划与实际 TCP 差值，不单独作为危险停止条件 |
 | 到位超时 | 8 s | 防止无限等待 |
 | 最终稳定观察 | 0.75 s | 到位后继续采样抖动 |
 | 手臂普通过载 | 450 | 同一电机连续 2 次达到时停止 |
@@ -887,9 +954,17 @@ build_so100_plus_right_follower_motion_limits(current_joint_radians)
 | 普通过温 | 60°C | 同一电机连续 2 次达到时停止 |
 | 紧急温度 | 70°C | 单次达到时立即停止 |
 
-30 Hz 和 5°跟踪误差保护线没有放宽。2026-08-02 的首次 LLM
-真机记录在 20°/s 时两次观察到 shoulder pitch 滞后约
-5.16°–5.19°，因此后续计划改为 12°/s，仍需再做人工真机验收。
+30 Hz、5°普通记录线和 8°紧急节流线同时保留。5°–8°之间的教学机械臂
+动态滞后不再阻断轨迹。超过 8°时，执行器保持最后一个已验证目标，
+暂停后续 waypoint，并根据六关节实时反馈等待电机追赶。恢复到 8°内后
+继续同一条轨迹；持续 8 秒仍追不上、
+`stop`、过载、过温或通信异常仍会停止。
+
+TCP 超过 12 mm 现在表示“到位精度较差”，不等于碰撞或过载。
+Adapter 会记录计划 TCP、实际 TCP 和误差；会话层随后用真实反馈
+检查不规则工作空间、关节/底座范围、夹爪映射和姿态门禁。
+真实姿态不安全时仍会失败关闭；后续命令从新读取的真实 TCP 出发，
+不把计划目标当成已到达位置。
 | 夹爪单步 | 10° | 分段开合 |
 | 夹爪等待 | 2.5 s | 等待位置反馈 |
 | 夹爪负载上限 | 300 | 堵转保护 |
@@ -1029,7 +1104,7 @@ assert skills["move_arm"].enabled is False
 
 这是故意的失败关闭策略，避免把示例范围误当成真机范围。
 
-### 把正式范围交给 `right_follower` Skill
+### 构造 `right_follower` Skill
 
 ```python
 from rosclaw_mini.skills.arm_skills import (
@@ -1039,12 +1114,15 @@ from rosclaw_mini.skills.arm_skills import (
 skills = build_so100_plus_right_follower_arm_skills(adapter)
 ```
 
-这个函数只把正式 `x/y/z` 边界交给 Skill、Validator 和 Safety Checker。完整真机接入还必须：
+单独调用这个函数时，它只把旧真机核心区的 `x/y/z` 边界交给
+Skill、Validator 和 Safety Checker，不会因为给了一个大包围盒就跳过空洞
+检查。完整不规则工作空间只由 `runtime.py` 创建的真机会话绑定；完整
+真机接入还必须：
 
 1. 用正确串口和校准创建 Robot；
 2. 创建运动学对象；
 3. 读取当前六关节位置；
-4. 用同一正式工作空间创建 `MotionLimits`；
+4. 加载并核对不规则网格，用其规划外包络创建 `MotionLimits`；
 5. 显式创建并连接 `SO100PlusAdapter`。
 
 统一入口现在会通过 `runtime.py` 完成上述装配。上面的 Skill 构造片段本身仍不等于完整真机连接；完整命令见“显式启动 SO-100 Plus”，底层构造和安全细节见 [SO-100 Plus 动作与真机接入文档](docs/arm_actions.md)。
@@ -1072,7 +1150,7 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 - SO-100 Plus Factory 与校准预检；
 - Adapter 连接、运动、夹爪、停止和卸力；
 - REST/TRANSITION/WORK/UNVERIFIED 会话状态与 unfold/fold 放行规则；
-- 展开、返回工作初始点和反向收纳的完整 MuJoCo 轨迹预检查；
+- 展开、退出正式工作区和反向收纳的完整 MuJoCo 轨迹预检查；
 - 预检查失败零运动、验证点与全部电机写入点一致、转换中 stop；
 - 提交后首条写入前与中间 waypoint 的确定性 stop 竞态；
 - 实测夹爪角的 MuJoCo qpos 映射、范围门禁和转换保持；
@@ -1098,7 +1176,7 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 | 工具 | 用途 | 是否接触真机 |
 | --- | --- | --- |
 | `scripts/simulate_so100_plus_workspace.py` | 百万姿态离线采样与 MuJoCo 碰撞过滤 | 否 |
-| `scripts/simulate_so100_plus_rest_workspace.py` | JoyCon 初始姿态附近 IK 网格与相邻路径检查 | 否 |
+| `scripts/simulate_so100_plus_rest_workspace.py` | 独立 `workspace_scan` 包的兼容 CLI；扫描指定参考姿态的不规则 IK/碰撞空间 | 否 |
 | `scripts/preview_so100_plus_local_grid.py` | 预览局部候选网格 | 否 |
 | `scripts/preview_so100_plus_mujoco_z.py` | 生成 MuJoCo 方向预览 | 否 |
 | `scripts/view_so100_plus_mujoco_z.py` | 打开 MuJoCo UI，观察姿态、TCP 与 +Z | 否 |
@@ -1137,7 +1215,7 @@ skills = build_so100_plus_right_follower_arm_skills(adapter)
 - 比较肘关节 P=32、48、64，最终保存 P=64；
 - 固定目标比较 PID 候选，保存已调关节 I=2、D=32；
 - 多次执行局部 `move_to()`；
-- 在 MuJoCo 中检查收纳姿态、JoyCon 初始姿态、TCP 标记和 +Z 方向；
+- 在 MuJoCo 中检查收纳姿态、JoyCon 初始转换姿态、TCP 标记和 +Z 方向；
 - 完成正式工作空间 14 个内缩边界代表点；
 - 记录运动中的位置、电压、电流、负载和温度。
 
@@ -1245,7 +1323,8 @@ rosclaw-mini/
   预检查，但这次代码变更没有执行真机，仍需现场复验展开、返回工作
   初始点和反向收纳三段路径；
 - 启动门禁不能识别环境障碍物或人员；
-- 正式工作空间只覆盖当前固定姿态邻域，不是任意姿态的全局空间；
+- 不规则 WORK 空间是当前模型、底座范围、校准绑定和固定末端方向下的
+  MuJoCo 扫描结果，不是任意姿态或任意现场环境的全局安全空间；
 - 除底座外，其余关节没有逐一完成当前安装条件下的物理边界认证；
 - `move_to()` 不能显式指定 roll、pitch、yaw；
 - `move_joints()` 是 Adapter 专用能力，尚未成为上层 Skill；
@@ -1295,6 +1374,9 @@ rosclaw-mini/
 
 - [SO-100 Plus 动作、坐标、安全配置与真机验证](docs/arm_actions.md)
 - [SO-100 Plus 仿真候选工作空间](docs/so100_plus_simulated_workspace.md)
+- [SO-100 Plus middle_internal 不规则仿真可达空间](docs/so100_plus_middle_irregular_workspace.md)
+- [独立工作空间扫描包、迁移和未来 LLM 接口说明](src/rosclaw_mini/workspace_scan/README.md)
+- [SO-100 Plus 1 cm 不规则空间扫描快照](src/rosclaw_mini/workspace_scan/SO100_PLUS_MIDDLE_INTERNAL_10MM.md)
 - [正式工作空间限制](docs/workspace_limits.md)
 - [关节限制](docs/joint_limits.md)
 - [安全规则](docs/safety_rules.md)

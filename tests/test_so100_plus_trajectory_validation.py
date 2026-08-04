@@ -166,7 +166,7 @@ def test_unfold_rejects_work_initial_pose_that_still_has_contact():
 
     with pytest.raises(
         SO100PlusTrajectoryValidationError,
-        match="工作初始姿态仍存在接触",
+        match="初始转换姿态仍存在接触",
     ):
         validator.verify_storage_transition(
             _unfold_plans(),
@@ -191,7 +191,7 @@ def test_return_to_work_initial_checks_every_dense_sample_for_collision():
 
     with pytest.raises(
         SO100PlusTrajectoryValidationError,
-        match="返回工作初始姿态路径.*存在接触",
+        match="无接触轨迹.*存在接触",
     ):
         validator.verify_collision_free_sequence(
             (plan,),
@@ -200,6 +200,44 @@ def test_return_to_work_initial_checks_every_dense_sample_for_collision():
         )
 
     assert len(visited) == len(plan.waypoints_radians) + 1
+
+
+def test_static_work_pose_checks_actual_joints_and_gripper_without_planning():
+    visited = []
+
+    def contacts(index, joints, sample_count):
+        visited.append((index, joints, sample_count))
+        return set()
+
+    validator = _validator_with_contacts(contacts)
+    joints = _joints(0.25)
+
+    report = validator.verify_collision_free_pose(
+        joints,
+        LinearTrajectoryKinematics(),
+        gripper_qpos=TEST_GRIPPER_QPOS,
+    )
+
+    assert visited == [(0, joints, 1)]
+    assert report.sample_count == 1
+    assert report.minimum_tcp_z_m == pytest.approx(0.25)
+    assert report.initial_contact_pairs == frozenset()
+
+
+def test_static_work_pose_contact_fails_closed():
+    validator = _validator_with_contacts(
+        lambda _index, _joints, _count: {("arm", "obstacle")}
+    )
+
+    with pytest.raises(
+        SO100PlusTrajectoryValidationError,
+        match="实际 WORK 姿态存在接触",
+    ):
+        validator.verify_collision_free_pose(
+            _joints(0.25),
+            LinearTrajectoryKinematics(),
+            gripper_qpos=TEST_GRIPPER_QPOS,
+        )
 
 
 def test_fold_allows_only_final_storage_contacts_after_escape():

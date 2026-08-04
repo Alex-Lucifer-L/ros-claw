@@ -81,6 +81,16 @@ def build_command_prompt(
             "- “收纳/折叠机械臂/回到 follower_rest”使用 fold_arm，"
             "params={}。"
         )
+    if (
+        skills.get("revalidate_state")
+        and skills["revalidate_state"].enabled
+    ):
+        lifecycle_rules.append(
+            "- “重新认证/重新检查当前会话状态/回到或恢复 WORK 状态”使用 "
+            "revalidate_state，params={}。它只读取反馈，不产生运动，"
+            "适用于 UNVERIFIED 后确认机械臂是否仍安全位于当前状态；"
+            "不能用来表达实际移动到某个姿态。"
+        )
     lifecycle_guidance = (
         "\n会话动作语义：\n" + "\n".join(lifecycle_rules) + "\n"
         if lifecycle_rules

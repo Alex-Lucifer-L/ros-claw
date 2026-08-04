@@ -42,6 +42,8 @@ from rosclaw_mini.arm.so100_plus_factory import (
     create_so100_plus_robot,
 )
 from rosclaw_mini.arm.so100_plus_session import (
+    SO100_PLUS_MIDDLE_INTERNAL_OFFSET_M,
+    SO100_PLUS_NEAR_INTERNAL_OFFSET_M,
     SO100_PLUS_STORAGE_ESCAPE_FRACTION,
     SO100_PLUS_WORK_INITIAL_MAX_JOINT_ERROR_DEGREES,
     SO100_PLUS_WORK_INITIAL_MAX_TCP_ERROR_M,
@@ -112,9 +114,9 @@ CANDIDATE_FINAL_JOINT_TOLERANCE_DEGREES = 3.0
 CANDIDATE_FINAL_TCP_TOLERANCE_M = 0.012
 OBSERVATION_SECONDS = 1.0
 VALIDATION_OFFSETS_M = (
-    ("near_internal", (0.03, 0.0, 0.03)),
-    ("middle_internal", (0.07, -0.01, 0.06)),
-    ("near_internal_return", (0.03, 0.0, 0.03)),
+    ("near_internal", SO100_PLUS_NEAR_INTERNAL_OFFSET_M),
+    ("middle_internal", SO100_PLUS_MIDDLE_INTERNAL_OFFSET_M),
+    ("near_internal_return", SO100_PLUS_NEAR_INTERNAL_OFFSET_M),
     ("initial_return", (0.0, 0.0, 0.0)),
 )
 BOUNDARY_MARGIN_GRID_STEPS = 1
@@ -166,7 +168,7 @@ class CollisionFreePathValidation:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "从 README follower_rest 展开到 JoyCon 初始工作姿态，"
+            "从 README follower_rest 展开到 JoyCon 初始转换姿态，"
             "按所选模式验证进出通道或候选框内部点，"
             "最后回到 follower_rest。"
         )
@@ -300,7 +302,7 @@ def load_workspace_candidate(path: Path) -> WorkspaceCandidate:
         initial = _finite_tuple(
             payload["inputs"]["rest_tcp_m"],
             length=3,
-            label="JoyCon 初始工作姿态 TCP",
+            label="JoyCon 初始转换姿态 TCP",
         )
         box = payload["largest_all_valid_grid_box_containing_rest"]
         lower = _finite_tuple(
@@ -1130,7 +1132,7 @@ def main() -> int:
         validate_initial_pose(initial_snapshot, candidate)
         if args.transition_only:
             print(
-                "已到达 JoyCon 初始工作姿态；进出通道模式跳过"
+                "已到达 JoyCon 初始转换姿态；进出通道模式跳过"
                 "候选框内部点，现在沿已检查路径返回 follower_rest。",
                 flush=True,
             )
@@ -1138,15 +1140,15 @@ def main() -> int:
             recovery_stage = "candidate"
             print(
                 (
-                    "已到达 JoyCon 初始工作姿态，开始一次性验证"
+                    "已到达 JoyCon 初始转换姿态，开始一次性验证"
                     "内部点、六面和八角代表点。"
                     if args.boundary_suite
                     else (
-                        "已到达 JoyCon 初始工作姿态，开始连续验证"
+                        "已到达 JoyCon 初始转换姿态，开始连续验证"
                         f"剩余{max(len(checkpoints) - 1, 0)}个"
                         "边界代表点。"
                         if args.boundary_resume
-                        else "已到达 JoyCon 初始工作姿态，"
+                        else "已到达 JoyCon 初始转换姿态，"
                         "开始验证候选框内部点。"
                     )
                 ),

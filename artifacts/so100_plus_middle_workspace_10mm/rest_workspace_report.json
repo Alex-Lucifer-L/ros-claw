@@ -1,0 +1,143 @@
+{
+  "classification": "middle_internal_orientation_irregular_grid_candidate_not_real_hardware_certification",
+  "generated_at_utc": "2026-08-02T13:02:24.464466+00:00",
+  "inputs": {
+    "model": "lerobot-joycon_plus/lerobot/common/robot_devices/controllers/scene_plus.xml",
+    "candidate_report": "artifacts/so100_plus_workspace/workspace_report.json",
+    "support_plane_z_m": 0.0,
+    "base_driver_degrees": {
+      "minimum": -19.599609,
+      "maximum": 31.201172
+    },
+    "rest_joint_radians": [
+      -0.060557684032450876,
+      -2.177173218116595,
+      2.1927903006590057,
+      0.11579949846204318,
+      -0.06025478017104158,
+      1.5760530084419013
+    ],
+    "rest_tcp_m": [
+      0.3735714232704467,
+      -0.01118549428473789,
+      0.23932848277083313
+    ],
+    "reference_pose": "middle_internal",
+    "tcp_orientation": "middle_internal rotation matrix",
+    "gripper_driver_degrees": [
+      -5.0,
+      60.0
+    ],
+    "gripper_qpos_radians": [
+      -0.08726646259971647,
+      1.0471975511965976
+    ],
+    "gripper_combination": "intersection_all_listed_postures"
+  },
+  "grid": {
+    "bounds_source": "explicit_refinement_bounds",
+    "step_m": 0.01,
+    "shape": [
+      24,
+      10,
+      18
+    ],
+    "point_count": 4320,
+    "x_m": {
+      "minimum": 0.2835714232704467,
+      "maximum": 0.5135714232704467
+    },
+    "y_m": {
+      "minimum": -0.05118549428473789,
+      "maximum": 0.03881450571526211
+    },
+    "z_m": {
+      "minimum": 0.16932848277083312,
+      "maximum": 0.33932848277083316
+    }
+  },
+  "path_check": {
+    "start": "middle_internal joint position",
+    "max_joint_step_degrees": 1.0,
+    "checks": [
+      "joint limits",
+      "IK FK residual",
+      "endpoint self/table collision",
+      "interpolated path self/table collision",
+      "TCP z >= 0"
+    ]
+  },
+  "results": {
+    "ik_failed": 782,
+    "endpoint_collision": 0,
+    "path_collision": 0,
+    "valid": 3538,
+    "valid_ratio": 0.8189814814814815,
+    "ik_failure_types": {
+      "LimitViolationError": 177,
+      "InverseKinematicsError": 605
+    },
+    "valid_endpoint_aabb_m": {
+      "x": {
+        "minimum": 0.2835714232704467,
+        "maximum": 0.5135714232704467
+      },
+      "y": {
+        "minimum": -0.05118549428473789,
+        "maximum": 0.03881450571526211
+      },
+      "z": {
+        "minimum": 0.16932848277083312,
+        "maximum": 0.33932848277083316
+      }
+    }
+  },
+  "largest_all_valid_grid_box_containing_rest": {
+    "x": {
+      "minimum": 0.30357142327044667,
+      "maximum": 0.4435714232704467,
+      "span": 0.14,
+      "grid_points": 15
+    },
+    "y": {
+      "minimum": -0.05118549428473789,
+      "maximum": 0.02881450571526211,
+      "span": 0.08,
+      "grid_points": 9
+    },
+    "z": {
+      "minimum": 0.16932848277083312,
+      "maximum": 0.30932848277083314,
+      "span": 0.14,
+      "grid_points": 15
+    },
+    "point_count": 2025,
+    "grid_step_m": 0.01,
+    "continuous_box_volume_m3": 0.0015680000000000004,
+    "warning": "All sampled grid points and their rest-to-target paths passed, but unsampled interior and arbitrary point-to-point paths are not proven."
+  },
+  "box_directed_neighbor_check": {
+    "directed_edge_count": 11160,
+    "valid": 11160,
+    "ik_failed": 0,
+    "endpoint_collision": 0,
+    "path_collision": 0,
+    "all_valid": true,
+    "maximum_joint_delta_degrees": 14.74417674483565,
+    "ik_failure_types": {},
+    "meaning": "Every directed 1-grid-step move is re-solved from its source pose and collision-checked."
+  },
+  "artifacts": {
+    "grid": "artifacts/so100_plus_middle_workspace_10mm/rest_workspace_grid.npz",
+    "plot": "artifacts/so100_plus_middle_workspace_10mm/rest_workspace_views.png",
+    "report": "artifacts/so100_plus_middle_workspace_10mm/rest_workspace_report.json"
+  },
+  "limitations": [
+    "The irregular reachable set is sampled only at Cartesian grid points.",
+    "Every valid point was checked from middle_internal.",
+    "The TCP orientation is fixed to middle_internal.",
+    "Every valid point and path passed for all listed gripper postures.",
+    "Real backlash, sag, cable routing, payload, and thermal effects are absent.",
+    "Do not copy the irregular AABB into real WorkspaceLimits."
+  ]
+}

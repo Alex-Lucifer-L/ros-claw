@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import hashlib
+import inspect
 import math
 from pathlib import Path
 from threading import Lock, Thread
@@ -22,6 +23,8 @@ from rosclaw_mini.arm.so100_plus import (
 )
 from rosclaw_mini.arm.so100_plus_session import (
     ArmSessionState,
+    SO100_PLUS_MIDDLE_INTERNAL_RADIANS,
+    SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
     SO100PlusArmSession,
     build_so100_plus_storage_transition,
     build_so100_plus_transition_motion_limits,
@@ -49,6 +52,10 @@ from rosclaw_mini.skills.arm_skills import (
     build_so100_plus_right_follower_arm_skills,
 )
 from rosclaw_mini.skills.base import SkillDefinition
+from rosclaw_mini.workspace_scan.irregular_workspace import (
+    SO100PlusIrregularWorkspace,
+    load_default_so100_plus_irregular_workspace,
+)
 
 
 DEFAULT_SO100_PLUS_PORT = Path("/dev/lerobot_right")
@@ -389,6 +396,30 @@ def _cleanup_connected_adapter(adapter: ArmAdapter) -> None:
             adapter.disconnect()
 
 
+def _build_so100_plus_work_motion_limits(
+    builder: Callable[..., Any],
+    current_joint_radians,
+    workspace: WorkspaceLimits,
+):
+    """兼容旧的一参数测试/扩展 builder，同时给正式 builder 传规划框。"""
+
+    try:
+        parameters = inspect.signature(builder).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    supports_workspace = any(
+        parameter.name == "workspace"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if supports_workspace:
+        return builder(
+            current_joint_radians,
+            workspace=workspace,
+        )
+    return builder(current_joint_radians)
+
+
 def build_so100_plus_runtime(
     robot_config: SO100PlusRobotConfig,
     *,
@@ -407,6 +438,9 @@ def build_so100_plus_runtime(
     trajectory_validator_factory: Callable[
         [], SO100PlusMuJoCoTrajectoryValidator
     ] = SO100PlusMuJoCoTrajectoryValidator,
+    irregular_workspace_factory: Callable[
+        [], SO100PlusIrregularWorkspace
+    ] = load_default_so100_plus_irregular_workspace,
     skill_builder: Callable[
         [ArmAdapter], dict[str, SkillDefinition]
     ] = build_so100_plus_right_follower_arm_skills,
@@ -428,7 +462,8 @@ def build_so100_plus_runtime(
         robot_config,
         certification,
     )
-    # MuJoCo 或模型不可用时必须在创建、连接 Robot 之前失败关闭。
+    # 网格、MuJoCo 或模型不可用时必须在创建、连接 Robot 之前失败关闭。
+    irregular_workspace = irregular_workspace_factory()
     trajectory_validator = trajectory_validator_factory()
 
     robot = robot_factory(robot_config)
@@ -456,14 +491,11 @@ def build_so100_plus_runtime(
             kinematics,
             include_torque=False,
         )
-        work_tcp_position_m = tuple(
-            kinematics.forward_position(
-                certification.startup_joint_radians
-            )
-        )
+        work_tcp_position_m = SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M
         startup_state, _startup_reason = classify_so100_plus_startup_pose(
             initial_snapshot,
             work_tcp_position_m,
+            SO100_PLUS_MIDDLE_INTERNAL_RADIANS,
         )
         storage_joint_radians = (
             initial_snapshot.joint_radians
@@ -476,8 +508,10 @@ def build_so100_plus_runtime(
             storage_joint_radians,
             kinematics,
         )
-        motion_limits = motion_limits_builder(
-            initial_snapshot.joint_radians
+        motion_limits = _build_so100_plus_work_motion_limits(
+            motion_limits_builder,
+            initial_snapshot.joint_radians,
+            irregular_workspace.planning_envelope,
         )
         transition_motion_limits = transition_motion_limits_builder(
             transition
@@ -517,6 +551,7 @@ def build_so100_plus_runtime(
             storage_joint_radians=storage_joint_radians,
             transition_motion_limits=transition_motion_limits,
             trajectory_validator=trajectory_validator,
+            work_workspace=irregular_workspace,
         )
         skills = bind_so100_plus_arm_session(
             skill_builder(work_adapter),

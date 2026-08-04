@@ -124,7 +124,7 @@ def main() -> int:
     )
 
     print(f"模型：{model_path}", flush=True)
-    print(f"JoyCon 初始工作姿态 TCP XYZ(m)：{start_position}", flush=True)
+    print(f"JoyCon 初始转换姿态 TCP XYZ(m)：{start_position}", flush=True)
     print(f"夹爪 TCP 目标 XYZ(m)：{target_position}", flush=True)
     print("红球 = move_to() 使用绝对 XYZ 控制的夹爪 TCP。", flush=True)
     print("它位于两根夹指尖端之间的夹持中心。", flush=True)

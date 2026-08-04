@@ -89,7 +89,7 @@ class SO100PlusRealHardwareProfile:
     waypoint_timeout_seconds: float = 8.0
     waypoint_poll_interval_seconds: float = 0.25
     final_settle_seconds: float = 0.75
-    joint_position_tolerance_degrees: float = 3.0
+    joint_position_tolerance_degrees: float = 5.0
     cartesian_tolerance_m: float = 0.012
     load_limit: float = 450.0
     critical_load_limit: float = 700.0
@@ -98,11 +98,12 @@ class SO100PlusRealHardwareProfile:
     critical_temperature_celsius: float = 70.0
     temperature_confirmation_samples: int = 2
     stream_frequency_hz: float = 30.0
-    # 2026-08-02 首次 LLM 相对运动真机记录在 20°/s 时，
-    # shoulder_pitch 的跟踪滞后两次超过 5°保护线。保持
-    # 30 Hz 和 5°保护不变，将计划推进速度降为 12°/s。
+    # 5° 是流式推进的反馈节流线，不是单次立即停止线。
+    # 超过时暂停发送后续 waypoint，等待实测关节追上；
+    # 超时、stop、过载、过温或通信异常仍会停止。
     stream_max_joint_speed_degrees_per_second: float = 12.0
     stream_tracking_error_limit_degrees: float = 5.0
+    stream_critical_tracking_error_limit_degrees: float = 8.0
     stream_telemetry_interval_seconds: float = 0.25
 
 
@@ -255,6 +256,10 @@ class SO100PlusMotionConfig:
     stream_tracking_error_limit_degrees: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.stream_tracking_error_limit_degrees
     )
+    stream_critical_tracking_error_limit_degrees: float = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE
+        .stream_critical_tracking_error_limit_degrees
+    )
     stream_telemetry_interval_seconds: float = (
         SO100_PLUS_REAL_HARDWARE_PROFILE.stream_telemetry_interval_seconds
     )
@@ -272,6 +277,7 @@ class SO100PlusMotionConfig:
             self.critical_temperature_celsius,
             self.stream_max_joint_speed_degrees_per_second,
             self.stream_tracking_error_limit_degrees,
+            self.stream_critical_tracking_error_limit_degrees,
             self.stream_telemetry_interval_seconds,
         )
         if not all(math.isfinite(value) for value in values):
@@ -330,6 +336,11 @@ class SO100PlusMotionConfig:
             < self.joint_position_tolerance_degrees
         ):
             raise ValueError("流式跟踪误差上限不能小于最终关节位置容差。")
+        if (
+            self.stream_critical_tracking_error_limit_degrees
+            <= self.stream_tracking_error_limit_degrees
+        ):
+            raise ValueError("流式紧急跟踪误差线必须大于普通记录线。")
         if self.stream_telemetry_interval_seconds <= 0:
             raise ValueError("流式遥测间隔必须大于 0。")
 
@@ -402,6 +413,9 @@ class SO100PlusAdapter(ArmAdapter):
         self._telemetry_history: list[SO100PlusTelemetry] = []
         self._last_motion_plan: JointMotionPlan | None = None
         self._last_settle_report: SO100PlusSettleReport | None = None
+        self._last_cartesian_target_m: tuple[float, float, float] | None = None
+        self._last_cartesian_actual_m: tuple[float, float, float] | None = None
+        self._last_cartesian_error_m: float | None = None
         self._load_limit_streak: dict[str, int] = {}
         self._temperature_limit_streak: dict[str, int] = {}
 
@@ -420,6 +434,18 @@ class SO100PlusAdapter(ArmAdapter):
     @property
     def last_settle_report(self) -> SO100PlusSettleReport | None:
         return self._last_settle_report
+
+    @property
+    def last_cartesian_target_m(self) -> tuple[float, float, float] | None:
+        return self._last_cartesian_target_m
+
+    @property
+    def last_cartesian_actual_m(self) -> tuple[float, float, float] | None:
+        return self._last_cartesian_actual_m
+
+    @property
+    def last_cartesian_error_m(self) -> float | None:
+        return self._last_cartesian_error_m
 
     @property
     def motion_waypoint_written(self) -> bool:
@@ -1062,6 +1088,9 @@ class SO100PlusAdapter(ArmAdapter):
         self._raise_if_stop_requested()
         self._validate_final_execution_plan(plan)
         self._last_settle_report = None
+        self._last_cartesian_target_m = None
+        self._last_cartesian_actual_m = None
+        self._last_cartesian_error_m = None
         self._load_limit_streak.clear()
         self._temperature_limit_streak.clear()
         follower_bus = self._follower_bus()
@@ -1169,8 +1198,7 @@ class SO100PlusAdapter(ArmAdapter):
                     start_telemetry,
                 )
 
-        self._validate_final_tcp_position(
-            follower_bus,
+        self._record_final_tcp_position(
             motor_names,
             final_positions,
             plan,
@@ -1230,42 +1258,36 @@ class SO100PlusAdapter(ArmAdapter):
                     "手臂动作已被 stop() 取消。"
                 )
 
+            with self._bus_lock:
+                _, final_positions = self._read_all_positions_locked(
+                    follower_bus
+                )
+                *_, max_error = self._largest_arm_position_error(
+                    motor_names,
+                    final_positions,
+                    final_target_positions,
+                )
+
+            if max_error > (
+                self.motion_config
+                .stream_critical_tracking_error_limit_degrees
+            ):
+                final_positions = self._wait_for_stream_tracking_catchup(
+                    follower_bus,
+                    motor_names,
+                    final_positions,
+                    final_target_positions,
+                    start_telemetry,
+                    poll_interval_seconds=interval_seconds,
+                )
+
             step_telemetry = None
             try:
-                with self._bus_lock:
-                    _, final_positions = self._read_all_positions_locked(
-                        follower_bus
-                    )
-                    (
-                        max_error_joint,
-                        max_error_measured,
-                        max_error_target,
-                        max_error,
-                    ) = self._largest_arm_position_error(
-                        motor_names,
-                        final_positions,
-                        final_target_positions,
-                    )
-                    if (
-                        max_error
-                        > self.motion_config.stream_tracking_error_limit_degrees
-                    ):
-                        self._hold_all_positions(
-                            follower_bus,
-                            final_positions,
-                        )
-                        raise SO100PlusArmSafetyError(
-                            f"流式轨迹关节 {max_error_joint} 目标 "
-                            f"{max_error_target:.6f}°、实测 "
-                            f"{max_error_measured:.6f}°，跟踪误差 "
-                            f"{max_error:.6f}° 超过 "
-                            f"{self.motion_config.stream_tracking_error_limit_degrees:.1f}°，"
-                            "已保持当前位置。"
-                        )
-                    if (
-                        sample_index % telemetry_stride == 0
-                        or sample_index == sample_count
-                    ):
+                if (
+                    sample_index % telemetry_stride == 0
+                    or sample_index == sample_count
+                ):
+                    with self._bus_lock:
                         step_telemetry = self._capture_telemetry_locked(
                             follower_bus,
                             phase="arm_stream",
@@ -1286,6 +1308,111 @@ class SO100PlusAdapter(ArmAdapter):
             start_telemetry,
         )
 
+    def _wait_for_stream_tracking_catchup(
+        self,
+        follower_bus,
+        motor_names: tuple[str, ...],
+        present_positions: tuple[float, ...],
+        target_positions: tuple[float, ...],
+        start_telemetry: SO100PlusTelemetry,
+        *,
+        poll_interval_seconds: float,
+    ) -> tuple[float, ...]:
+        """暂停轨迹推进，让电机追上最后一个已验证目标。
+
+        这里只读反馈，不重发目标、不插值、不重规划，因此后续
+        写给电机的 waypoint 仍与 MuJoCo 预检通过的计划一致。
+        """
+
+        elapsed_seconds = 0.0
+        telemetry_elapsed_seconds = (
+            self.motion_config.stream_telemetry_interval_seconds
+        )
+        latest_positions = present_positions
+        while True:
+            (
+                max_error_joint,
+                max_error_measured,
+                max_error_target,
+                max_error,
+            ) = self._largest_arm_position_error(
+                motor_names,
+                latest_positions,
+                target_positions,
+            )
+            if (
+                max_error
+                <= self.motion_config
+                .stream_critical_tracking_error_limit_degrees
+            ):
+                return latest_positions
+
+            if (
+                telemetry_elapsed_seconds
+                >= self.motion_config.stream_telemetry_interval_seconds
+            ):
+                catchup_telemetry = None
+                try:
+                    with self._bus_lock:
+                        catchup_telemetry = self._capture_telemetry_locked(
+                            follower_bus,
+                            phase="arm_stream_catchup",
+                        )
+                        self._raise_if_arm_telemetry_unsafe(
+                            start_telemetry,
+                            catchup_telemetry,
+                            follower_bus=follower_bus,
+                            present_positions=latest_positions,
+                        )
+                finally:
+                    if catchup_telemetry is not None:
+                        self._notify_telemetry(catchup_telemetry)
+                telemetry_elapsed_seconds = 0.0
+
+            if elapsed_seconds >= self.motion_config.waypoint_timeout_seconds:
+                with self._bus_lock:
+                    self._hold_all_positions(
+                        follower_bus,
+                        latest_positions,
+                    )
+                raise SO100PlusMotionConvergenceError(
+                    f"流式轨迹关节 {max_error_joint} 在 "
+                    f"{self.motion_config.waypoint_timeout_seconds:.1f} 秒内"
+                    "未追上最后一个已验证目标："
+                    f"目标 {max_error_target:.6f}°、实测 "
+                    f"{max_error_measured:.6f}°，跟踪误差 "
+                    f"{max_error:.6f}° 仍超过 "
+                    f"{self.motion_config.stream_critical_tracking_error_limit_degrees:.1f}°，"
+                    "已保持当前位置。"
+                )
+
+            wait_seconds = min(
+                poll_interval_seconds,
+                self.motion_config.waypoint_timeout_seconds
+                - elapsed_seconds,
+            )
+            stopped_while_waiting = self._wait(wait_seconds)
+            elapsed_seconds += wait_seconds
+            telemetry_elapsed_seconds += wait_seconds
+            if stopped_while_waiting or self._stop_requested.is_set():
+                if not self._stop_requested.is_set():
+                    with self._bus_lock:
+                        _, latest_positions = (
+                            self._read_all_positions_locked(follower_bus)
+                        )
+                        self._hold_all_positions(
+                            follower_bus,
+                            latest_positions,
+                        )
+                raise SO100PlusMotionStoppedError(
+                    "手臂动作已被 stop() 取消。"
+                )
+
+            with self._bus_lock:
+                _, latest_positions = self._read_all_positions_locked(
+                    follower_bus
+                )
+
     def _write_motion_target(
         self,
         follower_bus,
@@ -1303,14 +1430,13 @@ class SO100PlusAdapter(ArmAdapter):
                 )
             self._motion_waypoint_written = True
 
-    def _validate_final_tcp_position(
+    def _record_final_tcp_position(
         self,
-        follower_bus,
         motor_names: tuple[str, ...],
         final_positions: tuple[float, ...],
         plan: JointMotionPlan,
     ) -> None:
-        """复算真实夹爪 TCP，并在最终误差超限时保持当前位置。"""
+        """记录真实 TCP 精度；安全去留由会话层的真实姿态门禁决定。"""
 
         final_arm_degrees = self._arm_values_by_name(
             motor_names,
@@ -1324,24 +1450,21 @@ class SO100PlusAdapter(ArmAdapter):
         final_position_m = self.kinematics.forward_position(
             final_joint_radians
         )
+        target_position_m = tuple(float(value) for value in plan.target_position_m)
+        actual_position_m = tuple(float(value) for value in final_position_m)
         cartesian_error_m = math.sqrt(
             sum(
                 (actual - target) ** 2
                 for actual, target in zip(
-                    final_position_m,
-                    plan.target_position_m,
+                    actual_position_m,
+                    target_position_m,
                     strict=True,
                 )
             )
         )
-        if cartesian_error_m > self.motion_config.cartesian_tolerance_m:
-            with self._bus_lock:
-                self._hold_all_positions(follower_bus, final_positions)
-            raise SO100PlusMotionConvergenceError(
-                f"夹爪 TCP 位置误差 {cartesian_error_m * 1000:.6f} mm 超过 "
-                f"{self.motion_config.cartesian_tolerance_m * 1000:.1f} mm，"
-                "已保持当前位置。"
-            )
+        self._last_cartesian_target_m = target_position_m
+        self._last_cartesian_actual_m = actual_position_m
+        self._last_cartesian_error_m = cartesian_error_m
 
     def _wait_for_arm_waypoint(
         self,

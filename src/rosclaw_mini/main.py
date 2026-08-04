@@ -289,8 +289,8 @@ def main(
                 )
             elif session_state.value == "WORK":
                 output_func(
-                    "已认证为 JoyCon 工作初始姿态；"
-                    "可在正式工作空间内执行工作动作。"
+                    "已认证为不规则 WORK 空间的 middle_internal；"
+                    "目标将经过网格单元、中心通道和完整轨迹门禁。"
                 )
         if runtime.current_tcp_position_m is not None:
             position = ", ".join(

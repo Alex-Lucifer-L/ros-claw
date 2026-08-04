@@ -9,6 +9,7 @@ from rosclaw_mini.arm.so100_plus import (
     SO100PlusArmSafetyError,
     SO100PlusGripperConfig,
     SO100PlusGripperSafetyError,
+    SO100PlusMotionConvergenceError,
     SO100PlusMotionConfig,
     SO100PlusMotionExecutionDisabledError,
     SO100PlusMotionPlanningDisabledError,
@@ -816,6 +817,13 @@ def test_invalid_runtime_acceleration_is_rejected(runtime_acceleration):
             },
             "流式跟踪误差上限不能小于最终关节位置容差",
         ),
+        (
+            {
+                "stream_tracking_error_limit_degrees": 5.0,
+                "stream_critical_tracking_error_limit_degrees": 5.0,
+            },
+            "流式紧急跟踪误差线必须大于普通记录线",
+        ),
         ({"max_temperature_celsius": 0.0}, "电机温度上限必须大于 0"),
         (
             {
@@ -871,7 +879,7 @@ def test_saved_real_hardware_profile_is_the_runtime_default():
     assert gripper_config.load_limit == 300.0
     assert gripper_config.position_tolerance_degrees == 3.0
     assert motion_config.final_settle_seconds == 0.75
-    assert motion_config.joint_position_tolerance_degrees == 3.0
+    assert motion_config.joint_position_tolerance_degrees == 5.0
     assert motion_config.cartesian_tolerance_m == 0.012
     assert motion_config.load_limit == 450.0
     assert motion_config.critical_load_limit == 700.0
@@ -882,6 +890,7 @@ def test_saved_real_hardware_profile_is_the_runtime_default():
     assert motion_config.stream_frequency_hz == 30.0
     assert motion_config.stream_max_joint_speed_degrees_per_second == 12.0
     assert motion_config.stream_tracking_error_limit_degrees == 5.0
+    assert motion_config.stream_critical_tracking_error_limit_degrees == 8.0
 
 
 def test_telemetry_records_all_motors_and_notifies_callback():
@@ -1180,13 +1189,15 @@ def test_execute_joint_plan_rejects_changed_actual_start_before_motor_write():
         kinematics,
         gripper_qpos=math.radians(-5.0),
     ).plans[0]
-    robot.bus.all_positions[2] += 6.0
+    # Fake 运动学使用 driver_degrees / 100 得到模型弧度；
+    # +10 对应约 5.73°，明确超过当前 5° 起点容差。
+    robot.bus.all_positions[2] += 10.0
 
     with pytest.raises(
         SO100PlusArmSafetyError,
         match=(
             "执行前起点复核失败.*ellbow_joint.*"
-            "超过现有 3.0° 关节位置容差.*未发送任何运动目标"
+            "超过现有 5.0° 关节位置容差.*未发送任何运动目标"
         ),
     ):
         adapter.execute_joint_plan(prechecked_plan)
@@ -1403,7 +1414,7 @@ def test_stop_after_first_final_waypoint_prevents_all_later_waypoints():
 
 def test_move_to_holds_measured_position_when_joint_misses_target():
     robot = FakeRobot()
-    robot.bus.arm_position_error_degrees = 3.01
+    robot.bus.arm_position_error_degrees = 5.01
     adapter = make_adapter(
         robot,
         kinematics=FakeMotionKinematics(),
@@ -1429,7 +1440,7 @@ def test_move_to_holds_measured_position_when_joint_misses_target():
         None,
     )
     assert writes[-1][1] == pytest.approx(
-        [14.01, 24.01, 34.01, 44.01, 54.01, 64.01, -5.0]
+        [16.01, 26.01, 36.01, 46.01, 56.01, 66.01, -5.0]
     )
 
 
@@ -1626,7 +1637,7 @@ def test_move_to_holds_immediately_at_critical_temperature_limit():
     )
 
 
-def test_move_to_holds_position_when_cartesian_error_exceeds_twelve_mm():
+def test_move_to_records_cartesian_error_exceeding_twelve_mm_without_hold():
     class CartesianMissKinematics(FakeMotionKinematics):
         def forward_position(self, joint_radians):
             return (0.313, 0.0, 0.2)
@@ -1640,20 +1651,19 @@ def test_move_to_holds_position_when_cartesian_error_exceeds_twelve_mm():
     )
     adapter.connect()
 
-    with pytest.raises(
-        SO100PlusArmSafetyError,
-        match="夹爪 TCP 位置误差 13.000000 mm 超过 12.0 mm",
-    ):
-        adapter.move_to(0.3, 0.0, 0.2)
+    adapter.move_to(0.3, 0.0, 0.2)
 
-    assert len(goal_write_calls(robot)) == (
-        len(adapter.last_motion_plan.waypoints_radians) + 1
+    assert len(goal_write_calls(robot)) == len(
+        adapter.last_motion_plan.waypoints_radians
     )
+    assert adapter.last_cartesian_target_m == pytest.approx((0.3, 0.0, 0.2))
+    assert adapter.last_cartesian_actual_m == pytest.approx((0.313, 0.0, 0.2))
+    assert adapter.last_cartesian_error_m == pytest.approx(0.013)
 
 
 def test_stop_cancels_arm_motion_and_holds_all_joints():
     robot = FakeRobot()
-    robot.bus.arm_position_error_degrees = 3.01
+    robot.bus.arm_position_error_degrees = 5.01
     adapter = None
 
     def stop_during_wait(_seconds):
@@ -1678,7 +1688,7 @@ def test_stop_cancels_arm_motion_and_holds_all_joints():
 
 def test_move_to_polls_until_slow_joint_reaches_waypoint():
     robot = FakeRobot()
-    robot.bus.arm_position_error_degrees = 3.01
+    robot.bus.arm_position_error_degrees = 5.01
     waits = []
 
     def settle_after_first_poll(seconds):
@@ -1791,11 +1801,64 @@ def test_move_to_streams_cosine_targets_without_stopping_at_each_waypoint():
     ] == ["arm_stream", "arm_stream"]
 
 
-def test_streaming_motion_holds_when_live_tracking_error_is_too_large():
+def test_streaming_motion_continues_through_record_only_tracking_error():
     robot = FakeRobot()
-    kinematics = FakeMotionKinematics()
+    waits = []
+
+    def clear_record_only_error_before_final_settle(seconds):
+        waits.append(seconds)
+        # 两个最终流式 waypoint 都允许 6° 普通滞后继续；
+        # 只在最终到位轮询前模拟舵机追到目标。
+        if len(waits) == 2:
+            robot.bus.all_positions[:6] = [
+                value - 6.0 for value in robot.bus.all_positions[:6]
+            ]
+            robot.bus.arm_position_error_degrees = 0.0
+        return False
+
     adapter = make_adapter(
         robot,
+        wait_func=clear_record_only_error_before_final_settle,
+        kinematics=FakeMotionKinematics(),
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(
+            stream_frequency_hz=20.0,
+            stream_tracking_error_limit_degrees=5.0,
+            stream_critical_tracking_error_limit_degrees=8.0,
+        ),
+    )
+    adapter.connect()
+    robot.bus.arm_position_error_degrees = 6.0
+
+    adapter.move_to(0.3, 0.0, 0.2)
+
+    assert len(goal_write_calls(robot)) == len(
+        adapter.last_motion_plan.waypoints_radians
+    )
+    assert "arm_stream_catchup" not in (
+        item.phase for item in adapter.telemetry_history
+    )
+
+
+def test_streaming_motion_pauses_until_critical_feedback_catches_up():
+    robot = FakeRobot()
+    kinematics = FakeMotionKinematics()
+    waits = []
+
+    def catch_up_after_first_pause(seconds):
+        waits.append(seconds)
+        # 第一次 wait 是第一个 waypoint 的流式间隔；第二次
+        # 是跟踪误差超线后的只读追赶等待。
+        if len(waits) == 2:
+            robot.bus.all_positions[:6] = [
+                value - 9.0 for value in robot.bus.all_positions[:6]
+            ]
+            robot.bus.arm_position_error_degrees = 0.0
+        return False
+
+    adapter = make_adapter(
+        robot,
+        wait_func=catch_up_after_first_pause,
         kinematics=kinematics,
         motion_limits=make_motion_limits(),
         motion_config=SO100PlusMotionConfig(
@@ -1805,13 +1868,91 @@ def test_streaming_motion_holds_when_live_tracking_error_is_too_large():
     )
     adapter.connect()
     # 起点保持匹配，只在第一条流式目标写入后注入跟踪误差。
-    robot.bus.arm_position_error_degrees = 6.0
+    robot.bus.arm_position_error_degrees = 9.0
 
-    with pytest.raises(SO100PlusArmSafetyError, match="流式轨迹关节"):
+    adapter.move_to(0.3, 0.0, 0.2)
+
+    writes = goal_write_calls(robot)
+    assert len(writes) == len(adapter.last_motion_plan.waypoints_radians)
+    written_waypoints = [
+        tuple(value / 100.0 for value in write[1][:6])
+        for write in writes
+    ]
+    for written, verified in zip(
+        written_waypoints,
+        adapter.last_motion_plan.waypoints_radians,
+        strict=True,
+    ):
+        assert written == pytest.approx(verified)
+    assert "arm_stream_catchup" in (
+        item.phase for item in adapter.telemetry_history
+    )
+
+
+def test_streaming_motion_holds_when_feedback_never_catches_up():
+    robot = FakeRobot()
+    adapter = make_adapter(
+        robot,
+        kinematics=FakeMotionKinematics(),
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(
+            waypoint_timeout_seconds=0.1,
+            waypoint_poll_interval_seconds=0.05,
+            final_settle_seconds=0.0,
+            stream_frequency_hz=20.0,
+            stream_tracking_error_limit_degrees=5.0,
+        ),
+    )
+    adapter.connect()
+    robot.bus.arm_position_error_degrees = 9.0
+
+    with pytest.raises(
+        SO100PlusMotionConvergenceError,
+        match="在 0.1 秒内未追上最后一个已验证目标",
+    ):
+        adapter.move_to(0.3, 0.0, 0.2)
+
+    writes = goal_write_calls(robot)
+    # 只写入第一个已验证 waypoint，然后在超时时保持实测位置。
+    assert len(writes) == 2
+    assert tuple(value / 100.0 for value in writes[0][1][:6]) == (
+        pytest.approx(adapter.last_motion_plan.waypoints_radians[0])
+    )
+
+
+def test_stop_during_stream_catchup_prevents_later_waypoints():
+    robot = FakeRobot()
+    wait_calls = 0
+    adapter = None
+
+    def stop_during_catchup(_seconds):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 2:
+            adapter.stop()
+        return False
+
+    adapter = make_adapter(
+        robot,
+        wait_func=stop_during_catchup,
+        kinematics=FakeMotionKinematics(),
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(
+            stream_frequency_hz=20.0,
+            stream_tracking_error_limit_degrees=5.0,
+        ),
+    )
+    adapter.connect()
+    robot.bus.arm_position_error_degrees = 9.0
+
+    with pytest.raises(SO100PlusMotionStoppedError, match=r"stop\(\) 取消"):
         adapter.move_to(0.3, 0.0, 0.2)
 
     writes = goal_write_calls(robot)
     assert len(writes) == 2
+    assert tuple(value / 100.0 for value in writes[0][1][:6]) == (
+        pytest.approx(adapter.last_motion_plan.waypoints_radians[0])
+    )
 
 
 def test_motion_planning_dependencies_must_be_configured_together():

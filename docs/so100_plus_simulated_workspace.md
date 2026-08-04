@@ -124,7 +124,7 @@ WorkspaceLimits(
 
 ## 4. 可视化
 
-红色星号表示 JoyCon 控制器初始工作姿态下的 TCP。
+红色星号表示 JoyCon 控制器初始参考姿态下的 TCP。
 
 ![SO-100 Plus 仿真候选工作空间](../artifacts/so100_plus_workspace/workspace_views.png)
 
@@ -151,7 +151,7 @@ NPZ 中主要字段：
 | `voxel_origin_m` | 体素网格原点 |
 | `occupied_voxel_indices` | 已占用体素的整数索引 |
 | `voxel_size_m` | 体素边长 |
-| `rest_tcp_m` | JoyCon 控制器初始工作姿态 TCP（字段保留旧名） |
+| `rest_tcp_m` | JoyCon 控制器初始参考姿态 TCP（字段保留旧名） |
 | `lower_joint_radians` | 本次采样关节下限 |
 | `upper_joint_radians` | 本次采样关节上限 |
 
@@ -221,14 +221,14 @@ python scripts/simulate_so100_plus_workspace.py \
 5. 真机代表点验证后，把每个面内缩 `1 cm` 的长方体登记为
    `SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS`；外层候选框仍不直接使用。
 
-## 10. JoyCon 初始工作姿态精扫
+## 10. JoyCon 初始转换姿态参考精扫
 
 上一节的百万点结果是“所有 TCP 姿态的可达位置并集”。为了更接近当前
 `move_to()` 保持姿态的实际语义，第二阶段固定
 `JoyConController_plus.init_qpos` 的 TCP 旋转矩阵，逐个求解笛卡尔
 网格。它不是 README 校准照片中的 `follower_rest` 折叠收纳姿态。
 
-### 10.1 控制器初始工作姿态
+### 10.1 控制器初始转换姿态
 
 ```text
 模型关节角(rad): (0.0, -3.1, 3.0, 0.0, 0.0, 1.57)
@@ -237,7 +237,7 @@ TCP(m):          (0.303571, -0.001185, 0.179328)
 
 该姿态的 shoulder pitch 约为 `-177.6°`，elbow 约为 `171.9°`，
 都靠近 MuJoCo 模型关节端点。因此其可达区域天然偏向向前、向上展开，
-初始工作点不可能成为一个上下、前后完全对称工作空间的中心。
+这个初始参考点不可能成为一个上下、前后完全对称工作空间的中心。
 
 ### 10.2 最终精扫条件
 
@@ -296,7 +296,7 @@ TCP(m):          (0.303571, -0.001185, 0.179328)
 0.001568 m³
 ```
 
-初始工作点位于 X 下边界附近不是算法遗漏，而是 shoulder pitch 和
+初始参考点位于 X 下边界附近不是算法遗漏，而是 shoulder pitch 和
 elbow 已经靠近模型端点。要获得前后更均衡的空间，需要另外定义一个
 远离关节端点的中性工作姿态。
 
@@ -315,8 +315,8 @@ elbow 已经靠近模型端点。要获得前后更均衡的空间，需要另�
 ```
 
 相邻 1 cm 移动中，单关节最大变化约为 `14.74°`。这说明候选框中
-存在接近运动学敏感区的点；真实执行仍应使用现有的 20 Hz 流式轨迹和
-20°/s 关节速度限制，不能把“1 cm 网格”误解为“关节只变化很小”。
+存在接近运动学敏感区的点；真实执行仍应使用现有的 30 Hz 流式轨迹和
+12°/s 关节速度限制，不能把“1 cm 网格”误解为“关节只变化很小”。
 
 相邻边全部通过证明：如果规划器沿网格相邻点移动，框内存在经过仿真检查的
 离散连通路径。它不证明任意两个远点之间的一次直线关节插值都安全。
@@ -329,7 +329,7 @@ elbow 已经靠近模型端点。要获得前后更均衡的空间，需要另�
 | `artifacts/so100_plus_rest_workspace/rest_workspace_grid.npz` | 网格状态与目标关节解 |
 | `artifacts/so100_plus_rest_workspace/rest_workspace_views.png` | 固定姿态有效点和候选框 |
 
-![SO-100 Plus JoyCon 初始工作姿态候选工作空间](../artifacts/so100_plus_rest_workspace/rest_workspace_views.png)
+![SO-100 Plus JoyCon 初始转换姿态参考候选空间](../artifacts/so100_plus_rest_workspace/rest_workspace_views.png)
 
 复现命令：
 
@@ -345,6 +345,10 @@ python scripts/simulate_so100_plus_rest_workspace.py \
     0.15932848288990053 0.3393284828899006 \
   --output-dir artifacts/so100_plus_rest_workspace
 ```
+
+扫描实现现位于 `src/rosclaw_mini/workspace_scan/so100_plus.py`；上述脚本
+只是为了兼容旧命令而保留的入口。独立包的结构与迁移说明见
+`src/rosclaw_mini/workspace_scan/README.md`。
 
 ### 10.7 当前决定
 

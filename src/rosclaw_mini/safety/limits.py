@@ -287,11 +287,29 @@ def resolve_relative_tcp_target(
     try:
         return workspace.validate_position(*target)
     except LimitViolationError as error:
+        available_displacement = (
+            (
+                workspace.x.minimum - current[0],
+                workspace.x.maximum - current[0],
+            ),
+            (
+                workspace.y.minimum - current[1],
+                workspace.y.maximum - current[1],
+            ),
+            (
+                workspace.z.minimum - current[2],
+                workspace.z.maximum - current[2],
+            ),
+        )
         raise LimitViolationError(
             "相对移动最终目标违反工作空间："
             f"当前 TCP={current} m；"
             f"请求位移 dx/dy/dz={displacement} m；"
             f"最终目标={target} m；{error}"
+            "按当前 TCP 计算的可用位移区间为 "
+            f"dx={available_displacement[0]} m、"
+            f"dy={available_displacement[1]} m、"
+            f"dz={available_displacement[2]} m。"
         ) from error
 
 
@@ -528,15 +546,21 @@ def build_so100_plus_right_follower_motion_limits(
     current_joint_radians: Sequence[float],
     *,
     max_step_radians: float = math.radians(2.0),
+    workspace: WorkspaceLimits = (
+        SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS
+    ),
 ) -> MotionLimits:
-    """构造正式工作空间与 right_follower 执行关节范围的组合限制。
+    """构造规划外包框与 right_follower 执行关节范围的组合限制。
 
     当前关节位置仍是必需输入，因为收纳姿态可能略超第三方模型边界；
     执行关节范围只会为当次当前位置向模型内部提供过渡，不会继续向外扩张。
+
+    ``workspace`` 只负责底层数值规划。SO-100 Plus 不规则 WORK 模式仍会
+    在会话层逐目标检查有效网格单元，不能用该外包框绕过不规则门禁。
     """
 
     return MotionLimits(
-        workspace=SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
+        workspace=workspace,
         joints=build_so100_plus_right_follower_execution_joint_limits(
             current_joint_radians,
             max_step_radians=max_step_radians,

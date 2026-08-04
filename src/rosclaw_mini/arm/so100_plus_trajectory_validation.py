@@ -343,7 +343,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
         *,
         gripper_qpos: float,
     ) -> VerifiedJointMotionSequence:
-        """验证普通工作位置返回工作初始姿态的完整计划。"""
+        """验证普通工作区或工作区转换通道的完整计划。"""
 
         plans_tuple = tuple(plans)
         samples = _plans_to_route(plans_tuple)
@@ -363,7 +363,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
         minimum_tcp_z = min(position[2] for position in positions)
         if minimum_tcp_z < 0.0:
             raise SO100PlusTrajectoryValidationError(
-                f"返回工作初始姿态路径的 TCP 最低 Z="
+                f"无接触轨迹的 TCP 最低 Z="
                 f"{minimum_tcp_z:.6f} m，低于支撑平面。"
             )
 
@@ -371,7 +371,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
         for index, pairs in enumerate(contacts):
             if pairs:
                 raise SO100PlusTrajectoryValidationError(
-                    "返回工作初始姿态路径第 "
+                    "无接触轨迹第 "
                     f"{index}/{len(samples) - 1} 个采样点存在接触："
                     f"{sorted(pairs)}。"
                 )
@@ -396,6 +396,52 @@ class SO100PlusMuJoCoTrajectoryValidator:
                     default=-1,
                 ),
             ),
+        )
+
+    def verify_collision_free_pose(
+        self,
+        joint_radians: Sequence[float],
+        kinematics: SO100PlusKinematics,
+        *,
+        gripper_qpos: float,
+    ) -> SO100PlusTrajectoryValidationReport:
+        """只读验证一个实际姿态，不规划也不生成任何运动轨迹。"""
+
+        joints = _finite_joints(
+            joint_radians,
+            label="待重新认证的实际关节姿态",
+        )
+        gripper_qpos = self._validate_gripper_qpos(gripper_qpos)
+        position = tuple(kinematics.forward_position(joints))
+        if len(position) != 3 or not all(
+            math.isfinite(value) for value in position
+        ):
+            raise SO100PlusTrajectoryValidationError(
+                "待重新认证姿态的 FK 没有返回三个有限 TCP 坐标。"
+            )
+        if position[2] < 0.0:
+            raise SO100PlusTrajectoryValidationError(
+                f"待重新认证姿态的 TCP Z={position[2]:.6f} m，"
+                "低于支撑平面。"
+            )
+
+        contacts = self._sample_contacts((joints,), gripper_qpos)
+        if len(contacts) != 1:
+            raise SO100PlusTrajectoryValidationError(
+                "MuJoCo 静态姿态检查没有返回唯一接触结果。"
+            )
+        if contacts[0]:
+            raise SO100PlusTrajectoryValidationError(
+                "待重新认证的实际 WORK 姿态存在接触："
+                f"{sorted(contacts[0])}。"
+            )
+        return SO100PlusTrajectoryValidationReport(
+            sample_count=1,
+            max_joint_sample_step_degrees=0.0,
+            minimum_tcp_z_m=position[2],
+            initial_contact_pairs=contacts[0],
+            final_contact_pairs=contacts[0],
+            last_contact_sample=-1,
         )
 
     def verify_storage_transition(
@@ -469,7 +515,7 @@ class SO100PlusMuJoCoTrajectoryValidator:
             allowed_storage_contacts = contacts[0]
             if contacts[-1]:
                 raise SO100PlusTrajectoryValidationError(
-                    "JoyCon 工作初始姿态仍存在接触："
+                    "JoyCon 初始转换姿态仍存在接触："
                     f"{sorted(contacts[-1])}。"
                 )
             for index, pairs in enumerate(contacts[:escape_index]):

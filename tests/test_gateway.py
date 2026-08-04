@@ -15,6 +15,9 @@ from rosclaw_mini.skills.arm_skills import (
     build_so100_plus_right_follower_arm_skills,
 )
 from rosclaw_mini.skills.base import SkillDefinition
+from rosclaw_mini.workspace_scan.irregular_workspace import (
+    load_default_so100_plus_irregular_workspace,
+)
 
 
 adapter = MockArmAdapter()
@@ -266,7 +269,7 @@ def test_mock_consecutive_relative_moves_use_previous_completed_position():
     assert relative_adapter.position == pytest.approx((0.36, -0.01, 0.26))
 
 
-def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
+def test_session_fixed_and_readonly_skills_reject_user_parameters():
     class StubSession:
         def __init__(self):
             self.calls = []
@@ -287,6 +290,7 @@ def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
         stop = _handle
         unfold_arm = _handle
         fold_arm = _handle
+        revalidate_state = _handle
 
     session = StubSession()
     right_skills = build_so100_plus_right_follower_arm_skills(
@@ -306,13 +310,73 @@ def test_unfold_and_fold_reject_all_user_supplied_path_parameters():
         make_command("fold_arm", {"speed": 1.0}),
         right_skills,
     )
+    accepted_revalidation = run_command(
+        make_command("revalidate_state", {}),
+        right_skills,
+    )
+    rejected_revalidation = run_command(
+        make_command("revalidate_state", {"force": True}),
+        right_skills,
+    )
 
     assert accepted_unfold.success is True
     assert rejected_unfold.success is False
     assert "不允许额外参数" in rejected_unfold.message
     assert rejected_fold.success is False
     assert "不允许额外参数" in rejected_fold.message
-    assert session.calls == ["unfold_arm"]
+    assert accepted_revalidation.success is True
+    assert rejected_revalidation.success is False
+    assert "不允许额外参数" in rejected_revalidation.message
+    assert session.calls == ["unfold_arm", "revalidate_state"]
+
+
+def test_session_gateway_uses_irregular_aabb_only_as_coarse_filter():
+    class StubSession:
+        def __init__(self):
+            self.calls = []
+            self.work_workspace_aabb = (
+                load_default_so100_plus_irregular_workspace().endpoint_aabb
+            )
+
+        def _handle(self, command):
+            self.calls.append(command)
+            return ExecutionResult(
+                command_id=command.command_id,
+                skill_name=command.skill_name,
+                success=True,
+                message="不规则网格 Handler 已接管",
+            )
+
+        move_arm = _handle
+        move_relative = _handle
+        open_gripper = _handle
+        close_gripper = _handle
+        stop = _handle
+        unfold_arm = _handle
+        fold_arm = _handle
+        revalidate_state = _handle
+
+    session = StubSession()
+    session_skills = build_so100_plus_right_follower_arm_skills(
+        MockArmAdapter(),
+        session=session,
+    )
+    target = (0.45, -0.08, 0.15)
+
+    result = run_command(
+        make_command(
+            params={"x": target[0], "y": target[1], "z": target[2]}
+        ),
+        session_skills,
+    )
+
+    assert result.success is True
+    assert len(session.calls) == 1
+    assert session.calls[0].params == {
+        "x": 0.45,
+        "y": -0.08,
+        "z": 0.15,
+    }
 
 
 def test_reject_unknown_skill():

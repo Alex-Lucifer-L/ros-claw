@@ -10,6 +10,10 @@ from rosclaw_mini.arm.kinematics import (
     SO100_PLUS_JOYCON_INITIAL_RADIANS,
     SO100PlusKinematics,
 )
+from rosclaw_mini.arm.so100_plus_session import (
+    SO100_PLUS_MIDDLE_INTERNAL_RADIANS,
+)
+from rosclaw_mini.workspace_scan import so100_plus as workspace_scan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +29,7 @@ MODEL_PATH = (
 )
 
 
-def _load_script_module():
+def _load_compatibility_script_module():
     spec = spec_from_file_location(
         "simulate_so100_plus_rest_workspace",
         SCRIPT_PATH,
@@ -38,8 +42,15 @@ def _load_script_module():
     return module
 
 
+def test_legacy_script_delegates_to_workspace_scan_package():
+    script = _load_compatibility_script_module()
+
+    assert script.main is workspace_scan.main
+    assert script.centered_axis_values is workspace_scan.centered_axis_values
+
+
 def test_centered_axis_values_contains_exact_center():
-    script = _load_script_module()
+    script = workspace_scan
 
     values, center_index = script.centered_axis_values(
         0.303,
@@ -55,7 +66,7 @@ def test_centered_axis_values_contains_exact_center():
 
 
 def test_explicit_refinement_bounds_must_contain_rest_and_stay_in_candidate():
-    script = _load_script_module()
+    script = workspace_scan
     rest = np.asarray((0.30, 0.0, 0.18))
     candidate_lower = np.asarray((-0.34, -0.31, 0.0))
     candidate_upper = np.asarray((0.53, 0.27, 0.55))
@@ -71,7 +82,7 @@ def test_explicit_refinement_bounds_must_contain_rest_and_stay_in_candidate():
     assert upper == pytest.approx((0.53, 0.15, 0.38))
     assert source == "explicit_refinement_bounds"
 
-    with pytest.raises(ValueError, match="包含 JoyCon 控制器初始 TCP"):
+    with pytest.raises(ValueError, match="包含参考 TCP"):
         script.select_grid_bounds(
             rest,
             candidate_lower,
@@ -79,9 +90,19 @@ def test_explicit_refinement_bounds_must_contain_rest_and_stay_in_candidate():
             (0.31, 0.53, -0.15, 0.15, 0.03, 0.38),
         )
 
+    expanded_lower, expanded_upper, _source = script.select_grid_bounds(
+        rest,
+        candidate_lower,
+        candidate_upper,
+        (-0.40, 0.60, -0.35, 0.30, 0.0, 0.60),
+        allow_outside_candidate_aabb=True,
+    )
+    assert expanded_lower == pytest.approx((-0.40, -0.35, 0.0))
+    assert expanded_upper == pytest.approx((0.60, 0.30, 0.60))
+
 
 def test_largest_valid_box_contains_center_and_only_true_points():
-    script = _load_script_module()
+    script = workspace_scan
     mask = np.zeros((6, 7, 8), dtype=bool)
     mask[1:6, 2:7, 1:7] = True
     center = (3, 4, 4)
@@ -99,7 +120,7 @@ def test_largest_valid_box_contains_center_and_only_true_points():
 
 
 def test_largest_valid_box_does_not_cross_internal_hole():
-    script = _load_script_module()
+    script = workspace_scan
     mask = np.ones((5, 5, 5), dtype=bool)
     mask[0, 0, 0] = False
     center = (2, 2, 2)
@@ -116,7 +137,7 @@ def test_largest_valid_box_does_not_cross_internal_hole():
 
 
 def test_directed_neighbor_edge_count_and_direction():
-    script = _load_script_module()
+    script = workspace_scan
     box = script.RestCenteredBox(0, 1, 0, 2, 0, 3)
 
     edges = list(script.iter_directed_neighbor_edges(box))
@@ -128,7 +149,7 @@ def test_directed_neighbor_edge_count_and_direction():
 
 
 def test_rest_pose_and_zero_length_path_are_collision_free():
-    script = _load_script_module()
+    script = workspace_scan
     model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
     data = mujoco.MjData(model)
     kinematics = SO100PlusKinematics()
@@ -148,4 +169,28 @@ def test_rest_pose_and_zero_length_path_are_collision_free():
         rest_qpos,
         rest_qpos,
         max_step_radians=np.radians(2.0),
+    )
+
+
+@pytest.mark.parametrize("gripper_degrees", (-5.0, 60.0))
+def test_middle_reference_pose_is_collision_free_for_runtime_gripper_extremes(
+    gripper_degrees,
+):
+    script = workspace_scan
+    model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
+    data = mujoco.MjData(model)
+    kinematics = SO100PlusKinematics()
+    joints = np.asarray(SO100_PLUS_MIDDLE_INTERNAL_RADIANS, dtype=float)
+    tcp = np.asarray(kinematics.forward_position(joints))
+    gripper_qpos = np.radians(gripper_degrees)
+
+    assert script.REFERENCE_JOINT_RADIANS["middle_internal"] == pytest.approx(
+        joints
+    )
+    assert not script.pose_has_collision(
+        model,
+        data,
+        joints,
+        tcp,
+        gripper_qpos=gripper_qpos,
     )
