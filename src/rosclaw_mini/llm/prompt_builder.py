@@ -73,23 +73,32 @@ def build_command_prompt(
     lifecycle_rules: list[str] = []
     if skills.get("unfold_arm") and skills["unfold_arm"].enabled:
         lifecycle_rules.append(
-            "- “展开机械臂/从 follower_rest 进入工作姿态”使用 "
-            "unfold_arm，params={}。"
+            "- REST → WORK：当机械臂已处于认证的 REST/"
+            "follower_rest，用户要求“展开机械臂/进入工作"
+            "状态”时使用 unfold_arm，params={}。它会沿认证"
+            "过渡轨迹主动移动机械臂。"
         )
     if skills.get("fold_arm") and skills["fold_arm"].enabled:
         lifecycle_rules.append(
-            "- “收纳/折叠机械臂/回到 follower_rest”使用 fold_arm，"
-            "params={}。"
+            "- WORK → REST：“收纳/折叠机械臂/回到 follower_rest”"
+            "使用 fold_arm，params={}。"
         )
     if (
         skills.get("revalidate_state")
         and skills["revalidate_state"].enabled
     ):
         lifecycle_rules.append(
-            "- “重新认证/重新检查当前会话状态/回到或恢复 WORK 状态”使用 "
-            "revalidate_state，params={}。它只读取反馈，不产生运动，"
-            "适用于 UNVERIFIED 后确认机械臂是否仍安全位于当前状态；"
-            "不能用来表达实际移动到某个姿态。"
+            "- UNVERIFIED 后重新认证：用户明确要求“重新读取/"
+            "重新检查/重新认证当前真实状态”时使用 "
+            "revalidate_state，params={}。它只读取反馈，不会移动"
+            "机械臂；它不等于“移动回 WORK”，不得用它绕过"
+            "状态门禁。"
+        )
+    if lifecycle_rules:
+        lifecycle_rules.append(
+            "- 若当前状态不明确，且用户语句既可能表示主动"
+            "展开/收纳，也可能表示只读重新认证，不要擅自猜测"
+            "会产生运动的 Skill；输出 unsupported_action。"
         )
     lifecycle_guidance = (
         "\n会话动作语义：\n" + "\n".join(lifecycle_rules) + "\n"
@@ -147,8 +156,10 @@ def build_command_prompt(
         "不相关文本绝不能猜成 stop。\n"
         "3. 打开/关闭必须明确指机械臂夹爪，不能把“打开文件”等普通"
         "文本解释成夹爪命令。\n"
-        "4. “回到原位/初始位置/回到 work”等没有唯一对应 Skill 的"
-        "表达不能猜成 unfold_arm 或 fold_arm。\n"
+        "4. 当语义和起始状态明确时，REST 进入 WORK 使用 "
+        "unfold_arm，WORK 返回 REST 使用 fold_arm，UNVERIFIED "
+        "只读重新认证使用 revalidate_state。“回到原位/初始位置”"
+        "等未说明是 REST 还是 WORK 的含糊表达不能擅自触发运动。\n"
         "5. 用户要求的动作无法由可用 Skill 准确表达时，输出保留的"
         '拒绝命令 {"skill_name":"unsupported_action","params":{}}；'
         "它会由现有 Gateway 安全拒绝。\n\n"

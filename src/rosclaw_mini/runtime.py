@@ -510,7 +510,7 @@ def build_so100_plus_runtime(
         )
         motion_limits = _build_so100_plus_work_motion_limits(
             motion_limits_builder,
-            initial_snapshot.joint_radians,
+            SO100_PLUS_MIDDLE_INTERNAL_RADIANS,
             irregular_workspace.planning_envelope,
         )
         transition_motion_limits = transition_motion_limits_builder(

@@ -993,7 +993,7 @@ class SO100PlusArmSession:
             )
         except Exception as error:
             raise RuntimeError(
-                "当前 WORK 起点已经不在登记的不规则工作空间内。"
+                f"当前 WORK 起点安全复核失败：{error}"
             ) from error
 
     def _validate_actual_work_snapshot(
@@ -1008,7 +1008,6 @@ class SO100PlusArmSession:
             self._work_workspace.validate_position(
                 *snapshot.tcp_position_m
             )
-            return
         except LimitViolationError as membership_error:
             if (
                 not self._work_workspace.requires_reference_hub
@@ -1018,8 +1017,10 @@ class SO100PlusArmSession:
             ):
                 raise membership_error
 
-        # 目标本身已经通过不规则单元门禁；这里仅处理真实硬件在既有
-        # 12 mm 到位门槛内落到网格边界外的情况，不扩大可命令目标空间。
+        # TCP 成员检查通过，或者真实到达位于已验证目标的
+        # 12 mm 特殊容差内，都只能证明 TCP 位置这一项可接受。
+        # 下面的模型关节、实测底座、夹爪映射和 MuJoCo 静态接触
+        # 检查仍必须全部执行。特殊容差不扩大可命令目标空间。
         SO100_PLUS_MODEL_JOINT_LIMITS.validate_position(
             snapshot.joint_radians
         )

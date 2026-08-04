@@ -38,6 +38,7 @@ from rosclaw_mini.command_schema.commands import Command
 from rosclaw_mini.execution.controller import ExecutionController
 from rosclaw_mini.safety.limits import (
     AxisLimits,
+    SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS,
     SO100_PLUS_RIGHT_FOLLOWER_WORKSPACE_LIMITS,
     WorkspaceLimits,
 )
@@ -204,9 +205,11 @@ class HubWorkFakeKinematics(LinearFakeKinematics):
 class FakeIrregularWorkWorkspace:
     requires_reference_hub = True
 
-    def __init__(self, kinematics, allowed_target) -> None:
+    def __init__(self, kinematics, allowed_target, *, event_log=None) -> None:
         self.reference_joint_radians = kinematics.work
         self.allowed_target = tuple(allowed_target)
+        self.validate_calls = []
+        self.event_log = event_log if event_log is not None else []
         self.endpoint_aabb = WorkspaceLimits(
             x=AxisLimits(0.17, 0.53),
             y=AxisLimits(-0.17, 0.10),
@@ -216,6 +219,8 @@ class FakeIrregularWorkWorkspace:
 
     def validate_position(self, *position):
         position = tuple(position)
+        self.validate_calls.append(position)
+        self.event_log.append(("validate_work_membership", position))
         if position not in {
             self.allowed_target,
             SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
@@ -341,10 +346,12 @@ class RecordingTrajectoryValidator:
         event_log=None,
         storage_error: Exception | None = None,
         return_error: Exception | None = None,
+        static_error: Exception | None = None,
     ) -> None:
         self.event_log = event_log if event_log is not None else []
         self.storage_error = storage_error
         self.return_error = return_error
+        self.static_error = static_error
         self.storage_calls = []
         self.return_calls = []
         self.static_pose_calls = []
@@ -420,8 +427,8 @@ class RecordingTrajectoryValidator:
         call = (tuple(joint_radians), gripper_qpos)
         self.static_pose_calls.append(call)
         self.event_log.append(("validate_static_pose", *call))
-        if self.return_error is not None:
-            raise self.return_error
+        if self.static_error is not None:
+            raise self.static_error
         return SO100PlusTrajectoryValidationReport(
             sample_count=1,
             max_joint_sample_step_degrees=0.0,
@@ -567,6 +574,283 @@ def _session(
     return session, kinematics, work, transition
 
 
+def test_actual_work_snapshot_exact_member_runs_all_pose_checks():
+    log = []
+    kinematics = LinearFakeKinematics(log)
+    snapshot = _formal_work_snapshot(kinematics)
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        snapshot.tcp_position_m,
+        event_log=log,
+    )
+    validator = RecordingTrajectoryValidator(event_log=log)
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+        event_log=log,
+    )
+
+    session._validate_actual_work_snapshot(
+        snapshot,
+        planned_target=snapshot.tcp_position_m,
+    )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == [
+        (
+            snapshot.joint_radians,
+            math.radians(snapshot.gripper_driver_degrees),
+        )
+    ]
+    assert log[-2:] == [
+        ("validate_work_membership", snapshot.tcp_position_m),
+        (
+            "validate_static_pose",
+            snapshot.joint_radians,
+            math.radians(snapshot.gripper_driver_degrees),
+        ),
+    ]
+
+
+def test_actual_work_snapshot_exact_member_rejects_model_joint_violation():
+    kinematics = LinearFakeKinematics()
+    snapshot = _formal_work_snapshot(kinematics)
+    joints = list(snapshot.joint_radians)
+    joints[2] = 4.0
+    snapshot = replace(snapshot, joint_radians=tuple(joints))
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        snapshot.tcp_position_m,
+    )
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    with pytest.raises(ValueError, match="ellbow_joint"):
+        session._validate_actual_work_snapshot(
+            snapshot,
+            planned_target=snapshot.tcp_position_m,
+        )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == []
+
+
+def test_actual_work_snapshot_exact_member_rejects_measured_base_violation():
+    kinematics = LinearFakeKinematics()
+    snapshot = _formal_work_snapshot(kinematics)
+    driver_degrees = list(snapshot.driver_degrees)
+    driver_degrees[0] = (
+        SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.maximum
+        + 0.1
+    )
+    snapshot = replace(snapshot, driver_degrees=tuple(driver_degrees))
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        snapshot.tcp_position_m,
+    )
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    with pytest.raises(ValueError, match="当前底座关节驱动角"):
+        session._validate_actual_work_snapshot(
+            snapshot,
+            planned_target=snapshot.tcp_position_m,
+        )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == []
+
+
+def test_fold_start_reports_exact_failed_pose_check_without_motion():
+    kinematics = LinearFakeKinematics()
+    snapshot = _formal_work_snapshot(kinematics)
+    driver_degrees = list(snapshot.driver_degrees)
+    driver_degrees[0] = (
+        SO100_PLUS_RIGHT_FOLLOWER_SHOULDER_ROTATION_DRIVER_LIMITS.maximum
+        + 0.1
+    )
+    snapshot = replace(snapshot, driver_degrees=tuple(driver_degrees))
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        snapshot.tcp_position_m,
+    )
+    transition = RecordingSessionAdapter()
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        snapshot,
+        kinematics=kinematics,
+        transition_adapter=transition,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    result = session.fold_arm(_command("fold_arm"))
+
+    assert result.success is False
+    assert session.state is ArmSessionState.WORK
+    assert "收纳前读取并认证当前 WORK 起点" in result.message
+    assert "当前底座关节驱动角" in result.message
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == []
+    assert transition.calls == []
+
+
+def test_actual_work_snapshot_exact_member_rejects_invalid_gripper_mapping():
+    kinematics = LinearFakeKinematics()
+    snapshot = replace(
+        _formal_work_snapshot(kinematics),
+        gripper_driver_degrees=None,
+    )
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        snapshot.tcp_position_m,
+    )
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    with pytest.raises(RuntimeError, match="缺少 gripper_joint"):
+        session._validate_actual_work_snapshot(
+            snapshot,
+            planned_target=snapshot.tcp_position_m,
+        )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == []
+
+
+def test_actual_work_snapshot_exact_member_rejects_static_contact():
+    kinematics = LinearFakeKinematics()
+    snapshot = _formal_work_snapshot(kinematics)
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        snapshot.tcp_position_m,
+    )
+    validator = RecordingTrajectoryValidator(
+        static_error=SO100PlusTrajectoryValidationError(
+            "模拟真实静态姿态存在禁止接触"
+        )
+    )
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    with pytest.raises(
+        SO100PlusTrajectoryValidationError,
+        match="禁止接触",
+    ):
+        session._validate_actual_work_snapshot(
+            snapshot,
+            planned_target=snapshot.tcp_position_m,
+        )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert len(validator.static_pose_calls) == 1
+
+
+def test_actual_work_snapshot_special_tolerance_runs_all_pose_checks():
+    kinematics = LinearFakeKinematics()
+    planned_target = (0.35, 0.0, 0.22)
+    snapshot = replace(
+        _formal_work_snapshot(kinematics),
+        tcp_position_m=(0.355, 0.0, 0.22),
+    )
+    workspace = FakeIrregularWorkWorkspace(kinematics, planned_target)
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    session._validate_actual_work_snapshot(
+        snapshot,
+        planned_target=planned_target,
+    )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == [
+        (
+            snapshot.joint_radians,
+            math.radians(snapshot.gripper_driver_degrees),
+        )
+    ]
+
+
+def test_actual_work_snapshot_special_tolerance_cannot_skip_later_check():
+    kinematics = LinearFakeKinematics()
+    planned_target = (0.35, 0.0, 0.22)
+    snapshot = replace(
+        _formal_work_snapshot(kinematics),
+        tcp_position_m=(0.355, 0.0, 0.22),
+        gripper_driver_degrees=None,
+    )
+    workspace = FakeIrregularWorkWorkspace(kinematics, planned_target)
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    with pytest.raises(RuntimeError, match="缺少 gripper_joint"):
+        session._validate_actual_work_snapshot(
+            snapshot,
+            planned_target=planned_target,
+        )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == []
+
+
+def test_actual_work_snapshot_rejects_nonmember_outside_special_tolerance():
+    kinematics = LinearFakeKinematics()
+    planned_target = (0.35, 0.0, 0.22)
+    snapshot = replace(
+        _formal_work_snapshot(kinematics),
+        tcp_position_m=(0.37, 0.0, 0.22),
+    )
+    workspace = FakeIrregularWorkWorkspace(kinematics, planned_target)
+    validator = RecordingTrajectoryValidator()
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        kinematics=kinematics,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    with pytest.raises(IrregularWorkspaceError, match="不规则网格空洞"):
+        session._validate_actual_work_snapshot(
+            snapshot,
+            planned_target=planned_target,
+        )
+
+    assert workspace.validate_calls == [snapshot.tcp_position_m]
+    assert validator.static_pose_calls == []
+
+
 def test_irregular_work_target_uses_verified_middle_hub_sequence():
     target = (0.45, -0.08, 0.15)
     log = []
@@ -668,6 +952,10 @@ def test_irregular_final_feedback_within_existing_tolerance_stays_work_when_safe
     assert result.success is True
     assert session.state is ArmSessionState.WORK
     assert validator.static_pose_calls == [
+        (
+            kinematics.work,
+            math.radians(final_snapshot.gripper_driver_degrees),
+        ),
         (
             kinematics.target_joints,
             math.radians(final_snapshot.gripper_driver_degrees),
@@ -1257,6 +1545,7 @@ def test_fold_plans_validates_and_executes_same_return_and_storage_plans():
 
     assert result.success is True
     assert [event[0] for event in event_log] == [
+        "validate_static_pose",
         "plan",
         "plan",
         "plan",
@@ -1397,6 +1686,7 @@ def test_fold_return_collision_precheck_does_not_move_and_keeps_work():
     assert session.state is ArmSessionState.WORK
     assert transition.calls == []
     assert [event[0] for event in event_log] == [
+        "validate_static_pose",
         "plan",
         "plan",
         "plan",
@@ -1431,6 +1721,7 @@ def test_fold_storage_collision_precheck_does_not_move_and_keeps_work():
     assert session.state is ArmSessionState.WORK
     assert transition.calls == []
     assert [event[0] for event in event_log] == [
+        "validate_static_pose",
         "plan",
         "plan",
         "plan",
@@ -1811,7 +2102,7 @@ def test_tracking_abort_can_be_read_only_revalidated_as_safe_work():
 def test_revalidate_state_static_work_collision_stays_unverified():
     kinematics = LinearFakeKinematics()
     validator = RecordingTrajectoryValidator(
-        return_error=SO100PlusTrajectoryValidationError(
+        static_error=SO100PlusTrajectoryValidationError(
             "模拟静态姿态存在接触"
         )
     )

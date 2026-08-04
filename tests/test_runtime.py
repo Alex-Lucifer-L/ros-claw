@@ -14,6 +14,7 @@ from rosclaw_mini.arm.so100_plus_session import (
     ArmSessionState,
     SO100_PLUS_MIDDLE_INTERNAL_RADIANS,
     SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
+    build_so100_plus_transition_motion_limits,
 )
 from rosclaw_mini.arm.so100_plus_trajectory_validation import (
     SO100PlusTrajectoryValidationUnavailableError,
@@ -30,6 +31,10 @@ from rosclaw_mini.runtime import (
     ArmRuntimeShutdownError,
     build_mock_runtime,
     build_so100_plus_runtime,
+)
+from rosclaw_mini.safety.limits import (
+    SO100_PLUS_MODEL_JOINT_LIMITS,
+    build_so100_plus_right_follower_motion_limits,
 )
 from rosclaw_mini.skills.arm_skills import (
     build_so100_plus_right_follower_arm_skills,
@@ -672,6 +677,107 @@ def test_so100_plus_runtime_reuses_factory_limits_and_right_follower_skills(
 
     assert adapters[1].calls == ["stop", "disconnect"]
     assert adapters[2].calls == []
+
+
+@pytest.mark.parametrize(
+    "startup_kind",
+    ("rest", "rest_model_outlier", "work", "work_offset"),
+)
+def test_work_limits_use_fixed_middle_reference_without_startup_drift(
+    tmp_path,
+    startup_kind,
+):
+    config = _certified_robot_config(tmp_path)
+    storage_driver_degrees = (
+        SO100_PLUS_REAL_HARDWARE_PROFILE.storage_rest_driver_degrees
+    )
+    storage_joint_radians = list(
+        SO100PlusKinematics.driver_degrees_to_model_radians(
+            storage_driver_degrees
+        )
+    )
+    middle_joint_radians = list(SO100_PLUS_MIDDLE_INTERNAL_RADIANS)
+
+    if startup_kind == "rest_model_outlier":
+        storage_joint_radians[2] = (
+            SO100_PLUS_MODEL_JOINT_LIMITS.upper_radians[2] + 0.25
+        )
+    elif startup_kind == "work_offset":
+        middle_joint_radians[2] += math.radians(3.0)
+
+    if startup_kind.startswith("rest"):
+        robot = FakeRobot((*storage_driver_degrees, 0.0))
+        current_joint_radians = tuple(storage_joint_radians)
+        current_tcp_position_m = (0.183792, -0.049054, 0.004970)
+        expected_state = ArmSessionState.REST
+        expected_transition_storage = current_joint_radians
+    else:
+        robot = FakeRobot()
+        current_joint_radians = tuple(middle_joint_radians)
+        current_tcp_position_m = SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M
+        expected_state = ArmSessionState.WORK
+        expected_transition_storage = (
+            SO100PlusKinematics.driver_degrees_to_model_radians(
+                storage_driver_degrees
+            )
+        )
+
+    kinematics = FakeKinematics(
+        current_tcp_position_m=current_tcp_position_m,
+        current_joint_radians=current_joint_radians,
+    )
+    adapters: list[FakeSO100PlusAdapter] = []
+    work_references: list[tuple[float, ...]] = []
+    transition_configs = []
+
+    def adapter_factory(*args, **kwargs):
+        adapter = FakeSO100PlusAdapter(*args, **kwargs)
+        adapters.append(adapter)
+        return adapter
+
+    def work_limits_builder(current_joint_radians, *, workspace):
+        work_references.append(tuple(current_joint_radians))
+        return build_so100_plus_right_follower_motion_limits(
+            current_joint_radians,
+            workspace=workspace,
+        )
+
+    def transition_limits_builder(transition):
+        transition_configs.append(transition)
+        return build_so100_plus_transition_motion_limits(transition)
+
+    runtime = build_so100_plus_runtime(
+        config,
+        risk_acknowledged=True,
+        robot_factory=lambda _config: robot,
+        kinematics_factory=lambda: kinematics,
+        adapter_factory=adapter_factory,
+        motion_limits_builder=work_limits_builder,
+        transition_motion_limits_builder=transition_limits_builder,
+        trajectory_validator_factory=_fake_trajectory_validator_factory,
+    )
+
+    assert runtime.session_state is expected_state
+    assert work_references == [SO100_PLUS_MIDDLE_INTERNAL_RADIANS]
+    assert transition_configs[0].storage_joint_radians == pytest.approx(
+        expected_transition_storage
+    )
+    work_limits = adapters[1].kwargs["motion_limits"]
+    transition_limits = adapters[2].kwargs["motion_limits"]
+    assert work_limits.joints.lower_radians[2] == pytest.approx(
+        SO100_PLUS_MODEL_JOINT_LIMITS.lower_radians[2]
+    )
+    assert work_limits.joints.upper_radians[2] == pytest.approx(
+        SO100_PLUS_MODEL_JOINT_LIMITS.upper_radians[2]
+    )
+    assert transition_limits is runtime.session._transition_motion_limits
+    if startup_kind == "rest_model_outlier":
+        assert current_joint_radians[2] > work_limits.joints.upper_radians[2]
+        assert transition_limits.joints.upper_radians[2] == pytest.approx(
+            current_joint_radians[2]
+        )
+
+    runtime.shutdown()
 
 
 def test_so100_plus_runtime_recognizes_storage_feedback_as_rest(tmp_path):

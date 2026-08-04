@@ -130,27 +130,44 @@ def test_prompt_distinguishes_absolute_and_relative_motion() -> None:
 
 
 def test_prompt_maps_state_revalidation_without_implying_motion() -> None:
-    skill = SkillDefinition(
-        skill_name="revalidate_state",
-        description=(
-            "只读取真实反馈并重新认证会话状态，不产生运动"
-        ),
-        risk_level="low",
-        enabled=True,
-        params_schema={},
-        handler=lambda command: command,
-    )
+    skills = {
+        skill_name: SkillDefinition(
+            skill_name=skill_name,
+            description=description,
+            risk_level=risk_level,
+            enabled=True,
+            params_schema={},
+            handler=unused_handler,
+        )
+        for skill_name, description, risk_level in (
+            ("unfold_arm", "从 REST 展开到 WORK", "high"),
+            ("fold_arm", "从 WORK 收纳到 REST", "high"),
+            (
+                "revalidate_state",
+                "只读取真实反馈并重新认证会话状态，不产生运动",
+                "low",
+            ),
+        )
+    }
 
     prompt = build_command_prompt(
-        user_input="恢复work状态",
-        skills={"revalidate_state": skill},
+        user_input="请重新读取并认证当前真实状态",
+        skills=skills,
     )
 
-    assert "revalidate_state" in prompt
+    assert "REST → WORK" in prompt
+    assert "使用 unfold_arm" in prompt
+    assert "WORK → REST" in prompt
+    assert "使用 fold_arm" in prompt
+    assert "UNVERIFIED 后重新认证" in prompt
+    assert "使用 revalidate_state" in prompt
     assert "只读取反馈" in prompt
-    assert "不产生运动" in prompt
-    assert "回到或恢复 WORK 状态" in prompt
-    assert "不能用来表达实际移动到某个姿态" in prompt
+    assert "不会移动机械臂" in prompt
+    assert "不等于“移动回 WORK”" in prompt
+    assert "不得用它绕过状态门禁" in prompt
+    assert "回到或恢复 WORK 状态" not in prompt
+    assert "状态不明确" in prompt
+    assert "unsupported_action" in prompt
 
     generator = CommandGenerator(
         client=FakeLLMClient(
@@ -158,9 +175,9 @@ def test_prompt_maps_state_revalidation_without_implying_motion() -> None:
                 '{"skill_name":"revalidate_state","params":{}}'
             )
         ),
-        skills={"revalidate_state": skill},
+        skills=skills,
     )
-    command = generator.generate("恢复work状态")
+    command = generator.generate("请重新读取并认证当前真实状态")
     assert command.skill_name == "revalidate_state"
     assert command.params == {}
 
