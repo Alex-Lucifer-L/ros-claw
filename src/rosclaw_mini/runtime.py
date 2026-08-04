@@ -139,6 +139,11 @@ class ArmRuntime:
         init=False,
         repr=False,
     )
+    _deferred_emergency_shutdown: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -151,6 +156,16 @@ class ArmRuntime:
     def shutdown(self) -> None:
         """停止后限时等待后台动作；线程结束前绝不主动断开。"""
 
+        self._shutdown(emergency=False)
+
+    def emergency_shutdown(self) -> None:
+        """停止并等待动作结束，然后紧急关闭力矩并断开。"""
+
+        self._shutdown(emergency=True)
+
+    def _shutdown(self, *, emergency: bool) -> None:
+        """实现普通/紧急关闭；两者都不会在线程运行时断开。"""
+
         with self._shutdown_lock:
             if self._deferred_cleanup_error is not None:
                 raise self._deferred_cleanup_error
@@ -160,6 +175,9 @@ class ArmRuntime:
                 self._deferred_cleanup_thread is not None
                 and self._deferred_cleanup_thread.is_alive()
             ):
+                self._deferred_emergency_shutdown = (
+                    self._deferred_emergency_shutdown or emergency
+                )
                 raise ArmRuntimeShutdownError(
                     "后台动作仍在运行；延后 disconnect 已安排，尚未完成。"
                 )
@@ -188,7 +206,7 @@ class ArmRuntime:
                     errors.append(f"等待后台 Controller 失败：{error}")
 
             if self.controller.is_running():
-                self._start_deferred_cleanup()
+                self._start_deferred_cleanup(emergency=emergency)
                 details = "；".join(errors)
                 if details:
                     details = f"；此前还发生：{details}"
@@ -202,7 +220,10 @@ class ArmRuntime:
             if connected_at_start and not self.adapter.is_connected:
                 errors.append("Adapter 在关闭过程中意外断开")
             elif self.adapter.is_connected:
-                self._disable_torque_if_rest(errors)
+                if emergency:
+                    self._disable_torque_emergency(errors)
+                else:
+                    self._disable_torque_if_rest(errors)
                 try:
                     if self.adapter.is_connected:
                         self.adapter.disconnect()
@@ -252,9 +273,22 @@ class ArmRuntime:
         else:
             self._torque_disabled_on_shutdown = True
 
-    def _start_deferred_cleanup(self) -> None:
+    def _disable_torque_emergency(self, errors: list[str]) -> None:
+        """紧急退出明确请求卸力；不把当前姿态误报为 REST。"""
+
+        try:
+            self.adapter.disable_torque(emergency=True)
+        except Exception as error:
+            errors.append(f"紧急关闭力矩失败：{error}")
+        else:
+            self._torque_disabled_on_shutdown = True
+
+    def _start_deferred_cleanup(self, *, emergency: bool = False) -> None:
         """安排后台动作结束后的最终断开；调用方必须持有关闭锁。"""
 
+        self._deferred_emergency_shutdown = (
+            self._deferred_emergency_shutdown or emergency
+        )
         if (
             self._deferred_cleanup_thread is not None
             and self._deferred_cleanup_thread.is_alive()
@@ -282,7 +316,10 @@ class ArmRuntime:
                     return
                 cleanup_errors: list[str] = []
                 if self.adapter.is_connected:
-                    self._disable_torque_if_rest(cleanup_errors)
+                    if self._deferred_emergency_shutdown:
+                        self._disable_torque_emergency(cleanup_errors)
+                    else:
+                        self._disable_torque_if_rest(cleanup_errors)
                     if self.adapter.is_connected:
                         self.adapter.disconnect()
                 if not self.adapter.is_connected:

@@ -7,12 +7,13 @@ from rosclaw_mini.main import (
     build_llm_client_from_environment,
     build_parser,
     build_runtime_from_args,
+    dispatch_command,
     main,
     run_json_command_loop,
 )
 from rosclaw_mini.arm.mock_arm import MockArmAdapter
 from rosclaw_mini.arm.so100_plus_session import ArmSessionState
-from rosclaw_mini.command_schema.commands import ExecutionResult
+from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.execution.controller import ExecutionController
 from rosclaw_mini.llm.fake_client import FakeLLMClient
 from rosclaw_mini.rag.document import KnowledgeChunk, RetrievedChunk
@@ -233,6 +234,53 @@ def test_main_llm_mode_runs_natural_language_through_mock_runtime():
     assert exit_code == 0
     assert runtime.adapter.gripper_is_open is True
     assert any("open_gripper" in message for message in outputs)
+
+
+def test_main_real_backend_mode_does_not_add_per_command_confirmation():
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    client = FakeLLMClient(
+        response=(
+            '{"skill_name":"move_arm","params":'
+            '{"x":0.2,"y":0.1,"z":0.3}}'
+        )
+    )
+    prompts: list[str] = []
+    inputs = iter(
+        (
+            "移动到 x=0.2, y=0.1, z=0.3 米",
+            "result",
+            "exit",
+        )
+    )
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 2:
+            assert runtime.controller.wait(timeout=1.0) is not None
+        return next(inputs)
+
+    exit_code = main(
+        [
+            "--input-mode",
+            "llm",
+            "--disable-rag",
+            "--backend",
+            "so100_plus",
+            "--acknowledge-so100-plus-risk",
+        ],
+        input_func=fake_input,
+        output_func=lambda _message: None,
+        runtime_builder=lambda _args: runtime,
+        llm_client_builder=lambda **_kwargs: client,
+        environ={
+            "ROSCLAW_LLM_BASE_URL": "http://localhost:11434/v1",
+            "ROSCLAW_LLM_MODEL": "local-model",
+        },
+    )
+
+    assert exit_code == 0
+    assert runtime.adapter.position == (0.2, 0.1, 0.3)
+    assert not any(prompt.startswith("确认执行") for prompt in prompts)
 
 
 def test_main_llm_mode_initializes_rag_once_and_uses_its_context():
@@ -488,20 +536,99 @@ def test_main_warns_when_exit_does_not_start_from_rest():
     )
     outputs: list[str] = []
 
+    inputs = iter(("exit", "emergency_exit"))
     exit_code = main(
         [
             "--backend",
             "so100_plus",
             "--acknowledge-so100-plus-risk",
         ],
-        input_func=lambda _prompt: "exit",
+        input_func=lambda _prompt: next(inputs),
         output_func=outputs.append,
         runtime_builder=lambda _args: runtime,
     )
 
     assert exit_code == 0
-    assert runtime.exit_pose_warning in outputs
+    assert any("普通 exit 已拒绝" in message for message in outputs)
+    assert any("紧急退出" in message for message in outputs)
     assert runtime.shutdown_calls == 1
+
+
+def test_dispatch_submit_failure_never_reports_submitted():
+    class BusyController:
+        active_command_id = "already-running"
+
+        def submit(self, _command):
+            return False
+
+    class BusyRuntime:
+        controller = BusyController()
+
+    message = dispatch_command(
+        BusyRuntime(),
+        Command(
+            command_id="rejected",
+            skill_name="move_arm",
+            params={"x": 0.1, "y": 0.2, "z": 0.3},
+            source="test",
+        ),
+    )
+
+    assert "未提交" in message
+    assert "already-running" in message
+    assert "已提交" not in message
+
+
+def test_work_state_blocks_normal_exit_until_explicit_emergency_exit():
+    class WorkRuntime:
+        session_state = ArmSessionState.WORK
+
+    outputs: list[str] = []
+    inputs = iter(("exit", "emergency_exit"))
+
+    emergency = run_json_command_loop(
+        WorkRuntime(),
+        input_func=lambda _prompt: next(inputs),
+        output_func=outputs.append,
+    )
+
+    assert emergency is True
+    assert any("当前 SO-100 Plus 会话状态为 WORK" in message for message in outputs)
+    assert any("先执行 fold_arm" in message for message in outputs)
+    assert any("机械臂可能没有回到认证 REST" in message for message in outputs)
+
+
+def test_main_emergency_exit_uses_runtime_emergency_shutdown():
+    class EmergencyRuntime(FakeRuntime):
+        session_state = ArmSessionState.WORK
+        exit_pose_warning = "普通退出警告不应覆盖紧急提示"
+
+        def __init__(self):
+            super().__init__()
+            self.emergency_shutdown_calls = 0
+
+        def emergency_shutdown(self):
+            self.emergency_shutdown_calls += 1
+
+    runtime = EmergencyRuntime()
+    outputs: list[str] = []
+
+    exit_code = main(
+        [
+            "--backend",
+            "so100_plus",
+            "--acknowledge-so100-plus-risk",
+        ],
+        input_func=lambda _prompt: "emergency_exit",
+        output_func=outputs.append,
+        runtime_builder=lambda _args: runtime,
+    )
+
+    assert exit_code == 0
+    assert runtime.emergency_shutdown_calls == 1
+    assert runtime.shutdown_calls == 0
+    assert any("机械臂可能没有回到认证 REST" in message for message in outputs)
+    assert runtime.exit_pose_warning not in outputs
 
 
 def test_json_loop_runs_existing_gateway_skill_chain_with_mock():
@@ -623,6 +750,8 @@ def test_json_loop_stop_interrupts_background_session_action(skill_name):
         command = next(inputs)
         if '"skill_name": "stop"' in command:
             assert action_started.wait(timeout=0.5) is True
+        if command == "exit":
+            assert controller.wait(timeout=1.0) is not None
         return command
 
     run_json_command_loop(

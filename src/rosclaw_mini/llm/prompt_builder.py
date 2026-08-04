@@ -136,8 +136,14 @@ def build_command_prompt(
             '- “向右移动3cm” -> '
             '{"skill_name":"move_relative","params":'
             '{"dx":0.0,"dy":-0.03,"dz":0.0}}\n'
+            '- “向右3cm并向下2cm” -> '
+            '{"skill_name":"move_relative","params":'
+            '{"dx":0.0,"dy":-0.03,"dz":-0.02}}；一句话里的每个'
+            '方向都必须继续使用同一固定坐标轴。\n'
             '- “向右”缺少距离 -> '
             '{"skill_name":"move_relative","params":{}}\n'
+            '- “向”“往那边”“移动一下”方向或距离不完整 -> '
+            '{"skill_name":"unsupported_action","params":{}}\n'
         )
     if move_arm_enabled:
         examples += (

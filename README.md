@@ -6,8 +6,8 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 
 当前仓库已经完成默认 Mock 主链路、带项目知识检索的 OpenAI-compatible
 自然语言入口，以及
-SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护和可选摄像头
-接口。统一程序入口可以独立选择 `json/llm` 输入模式和
+SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护，以及 V2.0
+只读结构化视觉观察。统一程序入口可以独立选择 `json/llm/vision` 输入模式和
 `mock/so100_plus` 机械臂后端；默认仍是 `json + mock`，真机还必须额外
 确认连接、上力和运动风险。
 
@@ -56,7 +56,7 @@ Checker。
 | SO-100 Plus FK、IK、TCP、会话状态和受控转换轨迹 | 已实现；转换路径仍需现场复验 | 是，由真机运行时装配 |
 | 当前 `right_follower` WORK 空间 | 已接入 10 mm 网格的不规则 MuJoCo 可达集；旧 `12 × 6 × 12 cm` 是有真机代表点记录的核心区 | 是，只由 SO-100 Plus 会话门禁使用 |
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
-| USB 摄像头接口 | 软件接口和 FakeCamera 测试完成 | 否，真实单帧尚未验收 |
+| USB 摄像头 → 千问 VLM → `SceneObservation` | V2.0 软件链路和 Fake 测试完成 | 是，必须显式选择 `--input-mode vision`；真实单帧/API 尚未验收 |
 | 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
 | OpenAI-compatible 同步 LLM 客户端 | 已实现，API Key 可选 | 是，必须显式选择 `--input-mode llm` |
 | 自然语言 → RAG → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
@@ -120,12 +120,13 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | `llm` | `mock` | 调用模型生成 Command，但只操作内存 Mock |
 | `json` | `so100_plus` | 人工提供结构化命令，显式连接真机 |
 | `llm` | `so100_plus` | 模型生成 Command，再经过完整安全链控制真机；风险最高 |
+| `vision` | 不适用 | 只读单帧场景观察；不创建 Runtime、Controller 或机械臂连接 |
 
 当前 CLI 参数：
 
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
-| `--input-mode {json,llm}` | `json` | 选择结构化 JSON 或自然语言输入 |
+| `--input-mode {json,llm,vision}` | `json` | 选择结构化 JSON、自然语言命令或只读视觉观察 |
 | `--knowledge-dir` | 仓库 `knowledge/` | LLM 模式使用的静态项目知识目录 |
 | `--rag-top-k` | `4` | 每条命令最多加入的检索块数量 |
 | `--rag-max-context-chars` | `6000` | 项目知识上下文字符上限 |
@@ -135,6 +136,14 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | `--calibration-dir` | `lerobot-joycon_plus/.cache/calibration/so100_plus` | 真机校准目录 |
 | `--follower-name` | `right` | 真机 follower 身份 |
 | `--acknowledge-so100-plus-risk` | 未设置 | 真机必需的显式风险确认 |
+| `--camera-index` | `0` | vision 模式使用的摄像头编号 |
+| `--vlm-model` | 环境变量/默认值 | 千问视觉模型名，优先于 `DASHSCOPE_VL_MODEL` |
+| `--vision-question` | 未设置 | 提问一次并退出；省略时进入 observe/ask 交互 |
+| `--vision-image` | 未设置 | 使用本地图像，不打开摄像头 |
+| `--vision-timeout` | `30` | 视觉 API 请求超时秒数 |
+| `--vision-max-width` | `1280` | 上传前等比例缩放的最大图像宽度 |
+| `--vision-save-frame` | 未设置 | 只有显式指定时才保存捕获帧 |
+| `--vision-output-format {text,json}` | `text` | 人类可读或结构化 JSON 输出 |
 
 可以随时查看代码中实际生效的参数：
 
@@ -285,11 +294,14 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 请打开夹爪
 ```
 
-`result` 和 `exit` 由本地输入循环直接处理，不会发送给模型。其他输入会
+`result`、`exit`、`emergency_exit` 和“紧急退出”由本地输入循环直接处理，
+不会发送给模型。其他输入会
 先调用模型；如果发生连接失败、超时、HTTP 错误、服务响应不是合法 JSON、
 缺少 `choices[0].message.content` 或内容为空，程序会显示
 `LLM 调用失败` 并继续等待下一条输入。模型输出不是合法 Command 时也只会
-拒绝本次输入，不会绕过原有安全检查。
+拒绝本次输入，不会绕过原有安全检查。LLM 生成 `move_relative` 后，独立
+语义一致性检查还会把原始文本中的明确方向、轴、符号和 mm/cm/m 距离与
+`dx/dy/dz` 逐项比较；冲突或“向”“往那边”“移动一下”等含糊运动不会提交。
 
 LLM 模式默认启用第一版 RAG。`knowledge/*.md` 在启动时按相对路径稳定
 排序、校验唯一 `document_id` 并按 Markdown 二级标题切块；每条用户命令
@@ -331,7 +343,8 @@ Validator、Gateway、Safety Checker 和真机会话门禁不会降级。
 | `LLM 调用失败: ...` | 网络、超时、HTTP 或服务响应结构错误 | 不会，可继续输入 |
 | `模型返回的内容不是合法 JSON` | HTTP 成功，但模型文本不是 JSON | 不会 |
 | `模型生成的 Command 不合法: ...` | JSON 存在，但不符合 Command 数据结构 | 不会 |
-| `当前有命令正在执行...` | Controller 正忙，拒绝第二个普通命令 | 不会 |
+| `命令未提交：自然语言与 LLM 命令语义不一致...` | 明确方向/距离与生成参数冲突，或运动语句不完整 | 不会 |
+| `当前命令仍在执行：command_id=...` | Controller 正忙，只允许 `result`/`stop`，拒绝第二个普通命令 | 不会 |
 | `命令 ... 已提交` | Command 已进入后台 Controller | 不会 |
 
 自然语言中的停止请求仍由模型生成 `stop` Command，然后
@@ -407,7 +420,8 @@ X 比旧真机核心区下限小约 1 cm，它只对固定状态转换开放，�
 `±5°` 组合都已经过真机验证。MuJoCo、模型或认证配置不可用时同样失败
 关闭，不会跳过轨迹检查。
 
-展开或收纳若只是最终到位/稳定超差，程序会立即再读真实反馈和
+展开或收纳若只是最终到位/稳定超差，程序会先保持当前位置并等待
+`0.5 s`，再读一次真实反馈和
 夹爪保持状态。若完整 follower_rest 或 `middle_internal` 门禁仍然通过，
 会话自动恢复 `REST/WORK`，但本次结果仍然报失败，也不会自动再动一次。
 过载、过温、流式跟踪超限、通信、越界、夹爪异常和 `stop` 仍然进入
@@ -416,7 +430,13 @@ X 比旧真机核心区下限小约 1 cm，它只对固定状态转换开放，�
 follower_rest 就恢复 `REST`，若 TCP 位于登记的不规则网格单元、六关节及
 底座范围合法、实际夹爪可映射且 MuJoCo 静态姿态无接触，则恢复 `WORK`。
 
-输入 `exit`、输入结束或按下 Ctrl+C 时，运行时会：
+真机普通 `exit` 只在会话已经认证为 `REST` 时放行。`WORK`、
+`TRANSITION` 或 `UNVERIFIED` 会显示当前状态并留在输入循环，要求先显式
+收纳或重新认证；它不会擅自执行折叠。`emergency_exit`、“紧急退出”或
+Ctrl+C 是明确紧急路径：立即请求 stop，等待后台动作结束，再使用紧急卸力
+并断开，同时明确警告机械臂可能没有回到 REST。
+
+普通 REST 退出时，运行时会：
 
 ```text
 stop()
@@ -431,8 +451,9 @@ stop()
 立即调用 `disconnect()`，也不会报告安全完成；非 daemon 延后清理线程会
 继续使用有界等待，工作线程稍后结束后再按同一规则完成清理。只有软件
 状态为 `REST` 且 Adapter 再次读取的真实关节仍符合 `follower_rest` 时，
-普通退出才自动关闭力矩；`WORK`、`TRANSITION`、`UNVERIFIED` 或真实
-姿态复核失败时不卸力，仍尝试断开并明确报告原因。
+普通退出才自动关闭力矩。非 REST 的普通 `exit` 不再触发关闭流程；只有
+操作者明确选择紧急退出时，才会在 stop 和后台线程结束后紧急关闭力矩并
+断开，且不会把该姿态报告为安全 REST。
 
 ### 运行测试
 
@@ -453,6 +474,11 @@ flowchart TD
     A{input-mode}
     A -->|json| B[JSON 输入]
     A -->|llm| C[自然语言输入]
+    A -->|vision| VA[摄像头或本地图像]
+    VA --> VB[VisionService]
+    VB --> VC[千问视觉模型]
+    VC --> VD[SceneObservationParser]
+    VD --> VE[SceneObservation 终端输出]
     C --> D[OpenAI-compatible Client]
     D --> E[CommandGenerator]
     E --> F[模型返回 JSON]
@@ -484,14 +510,14 @@ flowchart TD
     U --> V[FeetechMotorsBus]
     V --> W[7 个 STS3215 电机]
 
-    R -. 独立可选接口 .-> CAMERA[OpenCV USB Camera]
-
     S --> Y[成功 ExecutionResult]
     W --> Y
     N -->|Handler 或 Adapter 异常| X
 ```
 
-摄像头画成虚线，是因为它由 `SO100PlusAdapter` 暴露统一接口，但生命周期与机械臂连接完全独立：不配置摄像头也能连接机械臂，机械臂未连接时也能单独抓图。
+`vision` 分支不会汇入 `Command` 或 `ExecutionController`。它在 Runtime
+装配前直接走只读 `SceneObservation` 输出，因此不配置摄像头也能连接
+机械臂，视觉失败也不会改变机械臂状态。
 
 ### 各层说人话解释
 
@@ -564,8 +590,15 @@ move_relative(dx, dy, dz)
 → OpenAICompatibleClient.generate(prompt)
 → 模型文本：{"skill_name":"move_arm","params":{"x":0.35,"y":0,"z":0.22}}
 → parse_json_command()
-→ 与 JSON 模式完全相同的 Command 和后续执行链
+→ Skill Validator / Safety Checker 只读预检
+→ 自然语言方向语义一致性检查
+→ 与 JSON 模式相同的 Controller / Gateway / Session 执行链
 ```
+
+正式 `python -m rosclaw_mini.main` 主入口不会对每条运动重复询问
+`y/N`；真机授权仍由启动参数 `--acknowledge-so100-plus-risk` 和后续全部
+安全门禁负责。逐命令确认只保留为测试注入选项，用于自动测试取消和提交
+分支，不参与正常 JSON/LLM 交互。
 
 这意味着模型不是 Gateway 的替代品。即使模型生成了不存在的 Skill、
 遗漏参数、增加额外参数、产生 `NaN`/越界坐标，或者在错误会话状态请求
@@ -573,9 +606,9 @@ move_relative(dx, dy, dz)
 仍会拒绝它。`disable_torque` 当前为禁用 Skill，因此不会进入模型可用
 Skill 列表。
 
-自然语言方向和动作选择由 Prompt 交给模型理解，不在
-`CommandGenerator` 前后增加关键词黑名单，也不改变既有调用链。Prompt
-使用统一语义：`+X` 是向前、伸出和远离底座，`-X` 是向后、收回一点和
+自然语言的开放表达仍由模型理解；模型输出后只对文本中明确出现的六个
+方向或 `+X/-X/+Y/-Y/+Z/-Z` 以及数值距离做确定性一致性复核，不用关键词
+替代 LLM，也不判断工作空间。固定语义为：`+X` 是向前、伸出和远离底座，`-X` 是向后、收回一点和
 靠近底座，`+Z/-Z` 是上/下；默认操作者站在底座后方并面向 `+X`，因此
 左是 `+Y`、右是 `-Y`。用户明确说出坐标轴时，以明确坐标轴为准。
 
@@ -611,7 +644,9 @@ controller.submit(move_command)
 → adapter.stop()
 ```
 
-它当前只允许一个普通命令同时运行。`stop` 走单独入口，不需要等待正在执行的移动先返回。
+它当前只允许一个普通命令同时运行，不排队也不覆盖当前线程、Command 或
+结果。拒绝时 CLI 会显示正在运行的 `command_id`，且不会误报“已提交”。
+`stop` 走单独入口，不需要等待正在执行的移动先返回；`result` 可在忙碌时读取状态。
 
 ## 5. 核心对象、Skill 和 Adapter
 
@@ -659,7 +694,7 @@ controller.submit(move_command)
 | `REST` | `unfold_arm`、`stop` |
 | `TRANSITION` | 仅 `stop` |
 | `WORK` | `move_arm`、`move_relative`、`fold_arm`、`open_gripper`、`close_gripper`、`stop` |
-| `UNVERIFIED` | `stop`、只读 `revalidate_state` 和安全退出；拒绝所有产生运动的 Skill |
+| `UNVERIFIED` | `stop`、只读 `revalidate_state`；普通 exit 拒绝，明确紧急退出仍可 stop、卸力和断开 |
 
 LLM 模式也使用同一份运行时 Skill Registry，所以状态门禁不会因输入方式
 改变。Prompt 中“出现了某个 Skill”也不等于该动作已经通过最终安全检查。
@@ -884,14 +919,21 @@ Z:  0.0393284828899005 .. 0.3793284828899005 m
 角点都有效时，目标才能通过第一道门禁。运动还会经过：
 
 ```text
-实际当前关节 → middle_internal 参考关节 → 目标关节
+优先：实际当前关节 → 目标关节
 → 固化最终 30 Hz waypoints
 → 对同一组 waypoints 做 MuJoCo 全轨迹检查
 → 原样执行同一组 waypoints
+
+直接路径规划或预检失败且尚未运动时：
+实际当前关节 → middle_internal 参考关节 → 目标关节
+→ 重新固化、预检并原样执行中心通道计划
 ```
 
-精确网格点使用扫描产物中保存的六关节解；完整单元内的连续点从
-`middle_internal` 重新求 IK。两者都会在发送任何电机目标前验证整条最终轨迹。
+直接路径使用执行时真实姿态作为 IK 起点，所以连续相对命令会从上一条的
+真实到达位置继续，不再固定先回中心。只有直接路径无法规划或 MuJoCo
+预检不通过时，才使用原中心通道；该回退对精确网格点复用扫描产物关节解，
+对完整单元内连续点从 `middle_internal` 求 IK。两种路线都会在发送任何
+电机目标前验证整条最终轨迹，预检失败不会先试着运动。
 网格文件路径、SHA-256、参考姿态、点数、步长或夹爪交集配置不匹配时，
 运行时会在创建 Robot 之前失败关闭。
 
@@ -1050,48 +1092,46 @@ adapter.disable_torque(emergency=True)
 
 ## 9. 摄像头是独立可选功能
 
-摄像头不是机械臂连接条件，也不是 Adapter 构造时的必选项。
+V2.0 新增的正式视觉入口是独立的只读链路：
 
-已实现：
-
-- `SO100PlusCameraConfig`；
-- `create_so100_plus_cameras()`；
-- 视频设备、名称、分辨率、帧率和颜色格式预检；
-- `connect_cameras()`；
-- `capture_camera_images()`；
-- `disconnect_cameras()`；
-- 相机失败与机械臂状态隔离。
-
-当前预期的右侧相机配置是：
-
-| 项目 | 值 |
-| --- | --- |
-| 名称 | `right` |
-| 后端 | LeRobot `OpenCVCamera` |
-| 默认格式 | RGB |
-| 默认分辨率 | 640 × 480 |
-| 默认帧率 | 60 FPS |
-| 输出键 | `observation.images.right` |
-| 数组形状 | HWC，`(480, 640, 3)` |
-
-生命周期可以完全分开：
-
-```python
-adapter.connect()             # 只连接机械臂
-
-# 只有需要画面时才执行：
-adapter.connect_cameras()
-images = adapter.capture_camera_images()
-adapter.disconnect_cameras()
-
-adapter.disconnect()          # 只断开机械臂
+```text
+USB 摄像头或本地图像
+→ OpenCV 单帧读取/等比例缩放/JPEG 编码
+→ 千问视觉模型
+→ SceneObservationParser
+→ SceneObservation
+→ 终端 text/json
 ```
 
-也可以只连接摄像头而不连接机械臂。摄像头连接失败会回滚本次相机连接，不会断开机械臂或改变力矩；机械臂连接失败也不会擅自关闭已经连接的摄像头。
+启动交互观察：
 
-建议使用稳定的 `/dev/v4l/by-id/...-video-index0` 或单独 udev 别名，不要把真实序列号提交到公共仓库。
+```bash
+export ROSCLAW_LLM_API_KEY="<你的百炼 API Key>"
+export DASHSCOPE_VL_MODEL="qwen-vl-plus"
 
-目前只完成软件接口和 FakeCamera 测试，真实摄像头单帧还没有验收，也尚未实现目标检测、相机标定、手眼标定或视觉伺服。
+PYTHONPATH=src python -m rosclaw_mini.main \
+  --input-mode vision \
+  --camera-index 0
+```
+
+然后输入 `observe`、`ask 红色方块在哪里` 或 `exit`。也可以用
+`--vision-question` 单次执行，或用 `--vision-image /path/to/image.jpg`
+完全绕开摄像头。每次摄像头观察只打开设备、读取一帧并立即释放；只有
+显式传入 `--vision-save-frame` 才写图像文件。
+
+视觉模式在创建 `ArmRuntime` 前分流，不创建 `ExecutionController`，不
+生成或提交 `Command`，不调用 Arm Adapter，也不要求
+`--acknowledge-so100-plus-risk`。视觉结果只包含画面相对区域和可选的
+归一化语义 bounding box；解析器明确拒绝机械臂/基座三维坐标字段。
+
+SO-100 Plus Adapter 原有的可选相机 Factory 和独立连接方法仍然保留，
+但 V2.0 CLI 不依赖机械臂 Adapter 的相机生命周期。两条路径都不会把
+摄像头变成机械臂连接条件。
+
+完整配置、Schema、摄像头编号检查、运行命令和 V2.1 边界见
+[V2.0 只读视觉观察](docs/vision_observation.md)。真实摄像头和真实百炼
+视觉 API 尚未现场验收；当前也没有目标检测、深度、相机标定、手眼标定、
+坐标转换或视觉伺服。
 
 ## 10. Python 调用示例
 
@@ -1321,6 +1361,7 @@ rosclaw-mini/
 │   │   ├── prompt_builder.py
 │   │   └── fake_client.py
 │   ├── rag/                          # Loader、Chunker、Retriever 与上下文提供器
+│   ├── vision/                       # 单帧相机、VLM、严格解析和 SceneObservation
 │   ├── ros2/                         # 尚未接入
 │   ├── web/                          # 尚未接入
 │   ├── state/                        # 尚未接入
@@ -1334,7 +1375,7 @@ rosclaw-mini/
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/rosclaw_mini/main.py` | 选择 json/llm 输入和 mock/so100_plus 后端；LLM 配置先于 Runtime 校验 |
+| `src/rosclaw_mini/main.py` | 选择 json/llm/vision；vision 在任何机械臂 Runtime 之前独立分流 |
 | `src/rosclaw_mini/runtime.py` | 装配 Mock/真机 Adapter、Skills、Controller，并执行 stop→disconnect 关闭 |
 | `src/rosclaw_mini/llm/client.py` | 定义 `LLMClient.generate()` 协议和统一 `LLMClientError` |
 | `src/rosclaw_mini/llm/openai_compatible_client.py` | 用标准库同步调用 OpenAI-compatible `/chat/completions` |
@@ -1343,6 +1384,10 @@ rosclaw-mini/
 | `src/rosclaw_mini/rag/context.py` | 一次加载全部参与检索的知识，限制 top_k/上下文长度并保留来源 |
 | `src/rosclaw_mini/rag/loader.py` | 校验 Front Matter、稳定加载目录并拒绝重复文档 ID |
 | `src/rosclaw_mini/rag/retriever.py` | 第一版可替换 `Retriever` 接口和确定性 `KeywordRetriever` |
+| `src/rosclaw_mini/vision/service.py` | 协调单帧读取、图像处理、VLM 调用和结构化解析，不依赖运动模块 |
+| `src/rosclaw_mini/vision/vlm_client.py` | 复用 OpenAI-compatible messages 请求并发送千问多模态内容 |
+| `src/rosclaw_mini/vision/parser.py` | 严格校验 SceneObservation，拒绝机械臂三维坐标字段 |
+| `docs/vision_observation.md` | V2.0 配置、运行、Schema、安全边界和 V2.1 说明 |
 | `knowledge/README.md` | 知识主题索引、静态/实时边界和更新规则 |
 | `src/rosclaw_mini/execution/controller.py` | 后台运行一个普通命令，并允许独立 stop 请求 |
 | `src/rosclaw_mini/gateway/command/gateway.py` | 编排 Skill 查找、校验、安全检查和执行 |
@@ -1370,6 +1415,8 @@ rosclaw-mini/
 - 统一入口已实现显式 `unfold_arm`/`fold_arm` 和离线 MuJoCo 完整轨迹
   预检查，但这次代码变更没有执行真机，仍需现场复验展开、返回工作
   初始点和反向收纳三段路径；
+- 普通 WORK 移动已改为完整预检后的直接路径优先，中心通道只作回退；
+  该新路径选择策略通过自动测试，但仍需操作者现场做小位移复验；
 - 启动门禁不能识别环境障碍物或人员；
 - 不规则 WORK 空间是当前模型、底座范围、校准绑定和固定末端方向下的
   MuJoCo 扫描结果，不是任意姿态或任意现场环境的全局安全空间；
@@ -1383,9 +1430,10 @@ rosclaw-mini/
 
 摄像头：
 
-- 软件生命周期已与机械臂解耦；
-- 真实单帧尚未验收；
-- 没有目标检测、相机内参、手眼标定和视觉闭环。
+- V2.0 单帧 → 千问 VLM → `SceneObservation` 软件链路已接入独立 CLI；
+- 真实 USB 摄像头和百炼视觉 API 组合尚未验收；
+- VLM bounding box 只是语义估计，不能用于精密抓取；
+- 没有目标检测、深度、相机内参、手眼标定、坐标转换和视觉闭环。
 
 工程化：
 
@@ -1414,7 +1462,8 @@ rosclaw-mini/
 4. 在操作者在场、可立即断电的条件下，现场复验现有显式
    `REST → unfold_arm → WORK → fold_arm → REST`，重点核对当次
    follower_rest 展开、任意已认证 WORK 点返回初始点和反向收纳；
-5. 单独完成真实摄像头一帧验证，不要求机械臂同时连接；
+5. 按 `docs/vision_observation.md` 单独完成真实摄像头 + 百炼 VLM 的一帧
+   验证，不要求也不允许机械臂同时连接；
 6. 增加统一结构化遥测日志和运行报告；
 7. 根据实际工位增加底座、桌面、线缆和障碍物模型；
 8. 在输入和底层真机入口都稳定后，再接入复杂 Skill、向量检索、Web 或 ROS 2。
@@ -1425,6 +1474,7 @@ rosclaw-mini/
 ## 15. 延伸文档
 
 - [RAG 项目知识索引与维护规则](knowledge/README.md)
+- [V2.0 只读视觉观察、配置与安全边界](docs/vision_observation.md)
 - [SO-100 Plus 动作、坐标、安全配置与真机验证](docs/arm_actions.md)
 - [SO-100 Plus 仿真候选工作空间](docs/so100_plus_simulated_workspace.md)
 - [SO-100 Plus middle_internal 不规则仿真可达空间](docs/so100_plus_middle_irregular_workspace.md)

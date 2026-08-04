@@ -57,6 +57,7 @@ class RecordingAdapter(ArmAdapter):
         self.stop_error = stop_error
         self.disconnect_on_stop = disconnect_on_stop
         self.disable_torque_error = disable_torque_error
+        self.disable_torque_emergency_args: list[bool] = []
 
     @property
     def is_connected(self) -> bool:
@@ -95,6 +96,7 @@ class RecordingAdapter(ArmAdapter):
 
     def disable_torque(self, *, emergency: bool = False) -> None:
         self.calls.append("disable_torque")
+        self.disable_torque_emergency_args.append(emergency)
         if self.disable_torque_error is not None:
             raise self.disable_torque_error
 
@@ -197,6 +199,7 @@ def test_runtime_shutdown_from_rest_disables_torque_before_disconnect():
 
     assert session.calls == ["request_stop"]
     assert adapter.calls == ["disable_torque", "disconnect"]
+    assert adapter.disable_torque_emergency_args == [False]
     assert runtime.torque_disabled_on_shutdown is True
     assert adapter.is_connected is False
 
@@ -441,6 +444,35 @@ def test_runtime_exit_from_work_only_stops_and_disconnects_without_folding():
     assert adapter.calls == ["disconnect"]
     assert adapter.is_connected is False
     assert "disable_torque" not in adapter.calls
+
+
+def test_runtime_emergency_exit_from_work_stops_disables_torque_and_disconnects():
+    adapter = RecordingAdapter()
+
+    class WorkSession:
+        state = ArmSessionState.WORK
+
+        def __init__(self):
+            self.calls = []
+
+        def request_stop(self):
+            self.calls.append("request_stop")
+
+    session = WorkSession()
+    runtime = ArmRuntime(
+        adapter=adapter,
+        skills={},
+        controller=ExecutionController(_successful_result),
+        session=session,
+    )
+
+    runtime.emergency_shutdown()
+
+    assert session.calls == ["request_stop"]
+    assert adapter.calls == ["disable_torque", "disconnect"]
+    assert adapter.disable_torque_emergency_args == [True]
+    assert runtime.torque_disabled_on_shutdown is True
+    assert adapter.is_connected is False
 
 
 def test_so100_plus_runtime_requires_risk_ack_before_factory_call():

@@ -205,9 +205,21 @@ class HubWorkFakeKinematics(LinearFakeKinematics):
 class FakeIrregularWorkWorkspace:
     requires_reference_hub = True
 
-    def __init__(self, kinematics, allowed_target, *, event_log=None) -> None:
+    def __init__(
+        self,
+        kinematics,
+        allowed_target,
+        *,
+        event_log=None,
+        additional_allowed_positions=(),
+    ) -> None:
         self.reference_joint_radians = kinematics.work
         self.allowed_target = tuple(allowed_target)
+        self.allowed_positions = {
+            self.allowed_target,
+            SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
+            *(tuple(position) for position in additional_allowed_positions),
+        }
         self.validate_calls = []
         self.event_log = event_log if event_log is not None else []
         self.endpoint_aabb = WorkspaceLimits(
@@ -221,10 +233,7 @@ class FakeIrregularWorkWorkspace:
         position = tuple(position)
         self.validate_calls.append(position)
         self.event_log.append(("validate_work_membership", position))
-        if position not in {
-            self.allowed_target,
-            SO100_PLUS_MIDDLE_INTERNAL_TCP_POSITION_M,
-        }:
+        if position not in self.allowed_positions:
             raise IrregularWorkspaceError("模拟不规则网格空洞")
         return position
 
@@ -546,6 +555,7 @@ def _session(
     trajectory_validator=None,
     event_log=None,
     work_workspace=None,
+    convergence_wait_func=lambda _seconds: None,
 ):
     log = event_log if event_log is not None else []
     kinematics = kinematics or LinearFakeKinematics(log)
@@ -570,6 +580,7 @@ def _session(
         ),
         trajectory_validator=validator,
         work_workspace=work_workspace,
+        wait_func=convergence_wait_func,
     )
     return session, kinematics, work, transition
 
@@ -851,7 +862,7 @@ def test_actual_work_snapshot_rejects_nonmember_outside_special_tolerance():
     assert validator.static_pose_calls == []
 
 
-def test_irregular_work_target_uses_verified_middle_hub_sequence():
+def test_irregular_work_target_prefers_verified_direct_sequence():
     target = (0.45, -0.08, 0.15)
     log = []
     kinematics = HubWorkFakeKinematics(target, log)
@@ -884,16 +895,140 @@ def test_irregular_work_target_uses_verified_middle_hub_sequence():
     )
 
     assert result.success is True
-    planned = [event[1] for event in log if event[0] == "plan"]
     validated = validator.return_calls[0][0]
     executed = [call[1] for call in work.calls if call[0] == "execute_joint_plan"]
-    assert len(planned) == 2
-    assert planned[0].target_joint_radians == kinematics.work
-    assert planned[1].target_joint_radians == kinematics.target_joints
+    assert len(validated) == 1
+    assert work.calls[0] == ("plan_move_to", *target)
     assert tuple(validated) == tuple(work.materialized_plans)
     assert tuple(executed) == tuple(validated)
-    assert not any(call[0] == "plan_move_to" for call in work.calls)
+    assert not any(event[0] == "plan" for event in log)
     assert "计划目标 (0.45, -0.08, 0.15)" in result.message
+
+
+def test_irregular_work_target_falls_back_to_middle_after_direct_rejection():
+    target = (0.45, -0.08, 0.15)
+    log = []
+    kinematics = HubWorkFakeKinematics(target, log)
+    workspace = FakeIrregularWorkWorkspace(kinematics, target)
+    work = RecordingSessionAdapter(event_log=log)
+
+    class RejectFirstSequence(RecordingTrajectoryValidator):
+        def verify_collision_free_sequence(
+            self,
+            plans,
+            kinematics,
+            *,
+            gripper_qpos,
+        ):
+            if not self.return_calls:
+                plans = tuple(plans)
+                self.return_calls.append((plans, gripper_qpos))
+                self.event_log.append(("validate_return", plans))
+                raise SO100PlusTrajectoryValidationError(
+                    "模拟直接路径碰撞"
+                )
+            return super().verify_collision_free_sequence(
+                plans,
+                kinematics,
+                gripper_qpos=gripper_qpos,
+            )
+
+    validator = RejectFirstSequence(event_log=log)
+    final_snapshot = replace(
+        _work_snapshot(kinematics),
+        joint_radians=kinematics.target_joints,
+        driver_degrees=(
+            SO100PlusKinematics.model_radians_to_driver_degrees(
+                kinematics.target_joints
+            )
+        ),
+        tcp_position_m=target,
+    )
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        _work_snapshot(kinematics),
+        final_snapshot,
+        kinematics=kinematics,
+        work_adapter=work,
+        trajectory_validator=validator,
+        event_log=log,
+        work_workspace=workspace,
+    )
+
+    result = session.move_arm(
+        _command("move_arm", {"x": target[0], "y": target[1], "z": target[2]})
+    )
+
+    assert result.success is True
+    assert len(validator.return_calls) == 2
+    direct_plan = validator.return_calls[0][0]
+    fallback_plans = validator.return_calls[1][0]
+    executed = tuple(
+        call[1] for call in work.calls if call[0] == "execute_joint_plan"
+    )
+    assert len(direct_plan) == 1
+    assert len(fallback_plans) == 2
+    assert executed == fallback_plans
+    assert direct_plan[0] not in executed
+    assert fallback_plans[0].target_joint_radians == kinematics.work
+    assert fallback_plans[1].target_joint_radians == kinematics.target_joints
+
+
+def test_consecutive_irregular_relative_moves_continue_from_current_pose():
+    kinematics = LinearFakeKinematics()
+    current = (0.35, 0.0, 0.22)
+    first_target = (0.36, 0.0, 0.22)
+    second_target = (0.37, 0.0, 0.22)
+    workspace = FakeIrregularWorkWorkspace(
+        kinematics,
+        first_target,
+        additional_allowed_positions=(current, second_target),
+    )
+    work = RecordingSessionAdapter()
+    validator = RecordingTrajectoryValidator()
+
+    def snapshot_at(position):
+        return replace(
+            _formal_work_snapshot(kinematics),
+            tcp_position_m=position,
+        )
+
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        snapshot_at(current),
+        snapshot_at(first_target),
+        snapshot_at(first_target),
+        snapshot_at(second_target),
+        kinematics=kinematics,
+        work_adapter=work,
+        trajectory_validator=validator,
+        work_workspace=workspace,
+    )
+
+    first_result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.01, "dy": 0.0, "dz": 0.0},
+        )
+    )
+    second_result = session.move_relative(
+        _command(
+            "move_relative",
+            {"dx": 0.01, "dy": 0.0, "dz": 0.0},
+        )
+    )
+
+    assert first_result.success is True
+    assert second_result.success is True
+    assert [call for call in work.calls if call[0] == "plan_move_to"] == [
+        ("plan_move_to", *first_target),
+        ("plan_move_to", *second_target),
+    ]
+    assert len(
+        [call for call in work.calls if call[0] == "execute_joint_plan"]
+    ) == 2
+    assert all(len(call[0]) == 1 for call in validator.return_calls)
+    assert "已从 (0.36, 0.0, 0.22) m 相对移动" in second_result.message
 
 
 def test_irregular_aabb_hole_rejected_before_planning_or_motion():
@@ -1444,14 +1579,19 @@ def test_fold_storage_gate_failure_marks_unverified():
 
 def test_fold_convergence_error_reauthenticates_work_without_auto_retry():
     kinematics = LinearFakeKinematics()
+    wait_calls = []
     transition = FailingExecutionAdapter(
-        SO100PlusMotionConvergenceError("模拟到位误差")
+        SO100PlusMotionConvergenceError(
+            "模拟到位误差",
+            failure_kind="position_timeout",
+        )
     )
     session, _kinematics, _work, _transition = _session(
         _work_snapshot,
         _formal_work_snapshot(kinematics),
         _work_snapshot(kinematics),
         transition_adapter=transition,
+        convergence_wait_func=wait_calls.append,
     )
 
     result = session.fold_arm(_command("fold_arm"))
@@ -1459,9 +1599,11 @@ def test_fold_convergence_error_reauthenticates_work_without_auto_retry():
     assert result.success is False
     assert session.state is ArmSessionState.WORK
     assert "模拟到位误差" in result.message
+    assert "运动超时后关节仍未进入最终到位容差" in result.message
     assert "已自动重新认证为 WORK" in result.message
     assert "没有自动重试运动" in result.message
     assert transition.execution_count == 1
+    assert wait_calls == [0.5]
 
 
 def test_fold_convergence_error_unknown_feedback_stays_unverified():
@@ -1482,6 +1624,36 @@ def test_fold_convergence_error_unknown_feedback_stays_unverified():
     assert session.state is ArmSessionState.UNVERIFIED
     assert "自动只读重新认证未通过" in result.message
     assert transition.execution_count == 1
+
+
+def test_fold_final_convergence_error_can_reauthenticate_rest_without_retry():
+    kinematics = LinearFakeKinematics()
+    wait_calls = []
+    transition = FailingExecutionAdapter(
+        SO100PlusMotionConvergenceError(
+            "模拟最终稳定误差",
+            failure_kind="stability_timeout",
+        ),
+        fail_on=5,
+    )
+    session, _kinematics, _work, _transition = _session(
+        _work_snapshot,
+        _formal_work_snapshot(kinematics),
+        _joycon_snapshot(kinematics),
+        _rest_snapshot(kinematics),
+        transition_adapter=transition,
+        convergence_wait_func=wait_calls.append,
+    )
+
+    result = session.fold_arm(_command("fold_arm"))
+
+    assert result.success is False
+    assert session.state is ArmSessionState.REST
+    assert "最终稳定观察未通过" in result.message
+    assert "已自动重新认证为 REST" in result.message
+    assert "没有自动重试运动" in result.message
+    assert transition.execution_count == 5
+    assert wait_calls == [0.5]
 
 
 def test_fold_nonconvergence_safety_error_never_auto_reauthenticates():

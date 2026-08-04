@@ -53,18 +53,30 @@ class OpenAICompatibleClient:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt 不能为空")
 
+        return self.generate_messages(
+            [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ]
+        )
+
+    def generate_messages(self, messages: list[dict]) -> str:
+        """发送 OpenAI-compatible messages，供文本和多模态客户端复用。"""
+
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages 必须是非空列表")
+        if not all(isinstance(message, dict) for message in messages):
+            raise ValueError("messages 中的每一项都必须是字典")
+
         endpoint = (
             f"{self.base_url.rstrip('/')}/chat/completions"
         )
 
         request_body = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            "messages": messages,
             "stream": False,
         }
 

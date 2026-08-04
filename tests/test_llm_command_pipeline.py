@@ -1,3 +1,5 @@
+import pytest
+
 from rosclaw_mini.command_schema.commands import Command, ExecutionResult
 from rosclaw_mini.gateway.command.gateway import run_command
 from rosclaw_mini.llm.command_generator import CommandGenerator
@@ -124,6 +126,9 @@ def test_prompt_distinguishes_absolute_and_relative_motion() -> None:
     assert "明确轴方向优先" in prompt
     assert "向右移动3cm" in prompt
     assert '"dy":-0.03' in prompt
+    assert "向右3cm并向下2cm" in prompt
+    assert '"dy":-0.03,"dz":-0.02' in prompt
+    assert "往那边" in prompt
     assert "unsupported_action" in prompt
 
     runtime.shutdown()
@@ -322,4 +327,243 @@ def test_llm_loop_reports_client_error_and_allows_next_input() -> None:
     assert result.skill_name == "open_gripper"
     assert runtime.adapter.gripper_is_open is True
 
+    runtime.shutdown()
+
+
+def test_llm_loop_rejects_direction_conflict_before_submit() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    submit_calls = []
+    original_submit = runtime.controller.submit
+
+    def recording_submit(command):
+        submit_calls.append(command)
+        return original_submit(command)
+
+    runtime.controller.submit = recording_submit
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response=(
+                '{"skill_name":"move_relative","params":'
+                '{"dx":0.03,"dy":0.0,"dz":-0.02}}'
+            )
+        ),
+        skills=runtime.skills,
+    )
+    outputs: list[str] = []
+    inputs = iter(("向右3cm并向下2cm", "exit"))
+    prompts: list[str] = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return next(inputs)
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=fake_input,
+        output_func=outputs.append,
+        require_motion_confirmation=True,
+    )
+
+    assert submit_calls == []
+    assert not any(prompt.startswith("确认执行") for prompt in prompts)
+    assert any("命令未提交" in message for message in outputs)
+    assert any("dy 应为 -0.03" in message for message in outputs)
+    runtime.shutdown()
+
+
+def test_llm_loop_rejects_incomplete_direction_before_submit() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    submit_calls = []
+    runtime.controller.submit = lambda command: submit_calls.append(command)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response=(
+                '{"skill_name":"move_relative","params":'
+                '{"dx":0.01,"dy":0.0,"dz":0.0}}'
+            )
+        ),
+        skills=runtime.skills,
+    )
+    outputs: list[str] = []
+    inputs = iter(("向", "exit"))
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=lambda _prompt: next(inputs),
+        output_func=outputs.append,
+    )
+
+    assert submit_calls == []
+    assert any("缺少可验证的明确方向" in message for message in outputs)
+    runtime.shutdown()
+
+
+@pytest.mark.parametrize(("answer", "expected_submits"), (("y", 1), ("yes", 1), ("", 0), ("n", 0), ("YES!", 0)))
+def test_real_motion_confirmation_accepts_only_y_or_yes(
+    answer,
+    expected_submits,
+) -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    submitted = []
+    original_submit = runtime.controller.submit
+
+    def recording_submit(command):
+        submitted.append(command)
+        return original_submit(command)
+
+    runtime.controller.submit = recording_submit
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response=(
+                '{"skill_name":"move_arm","params":'
+                '{"x":0.2,"y":0.1,"z":0.3}}'
+            )
+        ),
+        skills=runtime.skills,
+    )
+    outputs: list[str] = []
+    natural_inputs = iter(("移动到 x=0.2, y=0.1, z=0.3 米", "exit"))
+    prompts: list[str] = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        if prompt.startswith("确认执行"):
+            return answer
+        if submitted:
+            runtime.controller.wait(timeout=1.0)
+        return next(natural_inputs)
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=fake_input,
+        output_func=outputs.append,
+        require_motion_confirmation=True,
+    )
+
+    assert len(submitted) == expected_submits
+    assert prompts.count("确认执行？[y/N]") == 1
+    assert "解析结果：" in outputs
+    if expected_submits == 0:
+        assert runtime.controller.last_result() is None
+        assert any("已取消" in message for message in outputs)
+    runtime.shutdown()
+
+
+def test_mock_llm_motion_does_not_request_confirmation() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response=(
+                '{"skill_name":"move_arm","params":'
+                '{"x":0.2,"y":0.1,"z":0.3}}'
+            )
+        ),
+        skills=runtime.skills,
+    )
+    prompts: list[str] = []
+    inputs = iter(("移动到 x=0.2, y=0.1, z=0.3 米", "exit"))
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        if len(prompts) > 1:
+            runtime.controller.wait(timeout=1.0)
+        return next(inputs)
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=fake_input,
+        output_func=lambda _message: None,
+    )
+
+    assert not any(prompt.startswith("确认执行") for prompt in prompts)
+    assert runtime.controller.last_result().success is True
+    runtime.shutdown()
+
+
+def test_stop_bypasses_real_motion_confirmation() -> None:
+    runtime = build_mock_runtime(move_duration_seconds=0.0)
+    generator = CommandGenerator(
+        client=FakeLLMClient(
+            response='{"skill_name":"stop","params":{}}'
+        ),
+        skills=runtime.skills,
+    )
+    prompts: list[str] = []
+    inputs = iter(("停止机械臂", "exit"))
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return next(inputs)
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=fake_input,
+        output_func=lambda _message: None,
+        require_motion_confirmation=True,
+    )
+
+    assert not any(prompt.startswith("确认执行") for prompt in prompts)
+    assert runtime.adapter.is_stopped is True
+    runtime.shutdown()
+
+
+def test_llm_loop_rejects_second_motion_while_busy_and_allows_result_stop():
+    runtime = build_mock_runtime(move_duration_seconds=2.0)
+
+    class SequenceClient:
+        def __init__(self):
+            self.responses = iter(
+                (
+                    '{"skill_name":"move_arm","params":'
+                    '{"x":0.2,"y":0.1,"z":0.3}}',
+                    '{"skill_name":"open_gripper","params":{}}',
+                    '{"skill_name":"stop","params":{}}',
+                )
+            )
+
+        def generate(self, _prompt):
+            return next(self.responses)
+
+    generator = CommandGenerator(client=SequenceClient(), skills=runtime.skills)
+    outputs: list[str] = []
+    inputs = iter(
+        (
+            "移动到 x=0.2, y=0.1, z=0.3 米",
+            "打开夹爪",
+            "result",
+            "停止当前动作",
+            "result",
+            "exit",
+        )
+    )
+    input_count = 0
+
+    def fake_input(_prompt):
+        nonlocal input_count
+        input_count += 1
+        if input_count == 2:
+            assert runtime.adapter.wait_until_moving(timeout=1.0) is True
+        if input_count == 5:
+            assert runtime.controller.wait(timeout=1.0) is not None
+        return next(inputs)
+
+    run_llm_command_loop(
+        runtime,
+        generator,
+        input_func=fake_input,
+        output_func=outputs.append,
+    )
+    result = runtime.controller.wait(timeout=1.0)
+
+    assert runtime.adapter.gripper_is_open is None
+    assert result is not None
+    assert result.skill_name == "move_arm"
+    assert result.success is False
+    assert any("command_id=" in message and "只允许 result 或 stop" in message for message in outputs)
+    assert any("停止命令执行结果" in message for message in outputs)
     runtime.shutdown()

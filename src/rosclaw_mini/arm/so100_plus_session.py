@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 import math
 from threading import RLock
+import time
 from typing import Protocol
 
 from rosclaw_mini.arm.kinematics import (
@@ -53,6 +54,7 @@ SO100_PLUS_STORAGE_ESCAPE_FRACTION = 0.20
 SO100_PLUS_TRANSITION_SIMULATION_STEP_RADIANS = math.radians(1.0)
 SO100_PLUS_TRANSITION_EXECUTION_STEP_RADIANS = math.radians(2.0)
 SO100_PLUS_TRANSITION_WORKSPACE_MARGIN_M = 0.005
+SO100_PLUS_CONVERGENCE_RECHECK_WAIT_SECONDS = 0.5
 # 以下两个关节姿态由现有真机验收脚本的固定 TCP
 # 检查点和仓库现有 IK 解得到：
 # JoyCon 初始 TCP → near_internal(+3 cm X/+3 cm Z)
@@ -108,6 +110,16 @@ class _WorkMotionExecutionError(RuntimeError):
     def __init__(self, message: str, *, motion_started: bool) -> None:
         super().__init__(message)
         self.motion_started = motion_started
+
+
+def _describe_convergence_failure(
+    error: SO100PlusMotionConvergenceError,
+) -> str:
+    return {
+        "position_timeout": "运动超时后关节仍未进入最终到位容差",
+        "stability_timeout": "关节已进入到位容差，但最终稳定观察未通过",
+        "stream_catchup_timeout": "流式执行暂停后关节仍未追上已验证目标",
+    }.get(error.failure_kind, "最终到位或稳定门槛未通过")
 
 
 @dataclass(frozen=True)
@@ -170,6 +182,7 @@ class SO100PlusSessionAdapter(Protocol):
 
 
 PoseReader = Callable[[], SO100PlusPoseSnapshot]
+WaitFunction = Callable[[float], None]
 
 
 def _finite_tuple(
@@ -522,6 +535,10 @@ class SO100PlusArmSession:
         work_workspace: (
             SO100PlusIrregularWorkspace | RectangularWorkWorkspace | None
         ) = None,
+        convergence_recheck_wait_seconds: float = (
+            SO100_PLUS_CONVERGENCE_RECHECK_WAIT_SECONDS
+        ),
+        wait_func: WaitFunction = time.sleep,
     ) -> None:
         self._work_adapter = work_adapter
         self._transition_adapter = transition_adapter
@@ -529,6 +546,16 @@ class SO100PlusArmSession:
         self._kinematics = kinematics
         self._transition_motion_limits = transition_motion_limits
         self._trajectory_validator = trajectory_validator
+        if (
+            isinstance(convergence_recheck_wait_seconds, bool)
+            or not math.isfinite(convergence_recheck_wait_seconds)
+            or convergence_recheck_wait_seconds < 0
+        ):
+            raise ValueError("到位失败后的稳定复读等待时间必须是有限非负数。")
+        self._convergence_recheck_wait_seconds = float(
+            convergence_recheck_wait_seconds
+        )
+        self._wait_func = wait_func
         self._work_workspace = (
             work_workspace
             if work_workspace is not None
@@ -771,6 +798,10 @@ class SO100PlusArmSession:
         """对纯到位误差做一次只读门禁，绝不自动重试运动。"""
 
         try:
+            if self._convergence_recheck_wait_seconds > 0:
+                self._wait_func(self._convergence_recheck_wait_seconds)
+            if self._transition_was_interrupted():
+                return None, "稳定复读等待期间收到 stop，未继续重新认证"
             snapshot = self._pose_reader()
             self._validate_gripper_held(
                 snapshot,
@@ -778,12 +809,19 @@ class SO100PlusArmSession:
             )
             state, reason = self._classify_reauthenticated_pose(snapshot)
         except Exception as error:
-            return None, f"自动只读重新认证失败：{error}"
+            return None, (
+                "自动只读重新认证失败：到位门槛失败后已稳定等待 "
+                f"{self._convergence_recheck_wait_seconds:.2f} 秒；{error}"
+            )
         if state is ArmSessionState.UNVERIFIED:
-            return None, f"自动只读重新认证未通过：{reason}"
+            return None, (
+                "自动只读重新认证未通过：到位门槛失败后已稳定等待 "
+                f"{self._convergence_recheck_wait_seconds:.2f} 秒；{reason}"
+            )
         self._set_state(
             state,
-            f"纯到位误差后自动只读重新认证：{reason}",
+            "纯到位误差后经稳定等待自动只读重新认证："
+            f"{reason}",
         )
         return state, reason
 
@@ -1097,6 +1135,36 @@ class SO100PlusArmSession:
         )
         return finalized_return, finalized_target
 
+    def _plan_direct_work_sequence(
+        self,
+        *,
+        target: tuple[float, float, float],
+        held_gripper_driver_degrees: float,
+    ) -> tuple[JointMotionPlan, ...]:
+        """从当次实际起点直达目标，并固化最终电机 waypoint。"""
+
+        plan = self._work_adapter.plan_move_to(*target)
+        return (
+            self._work_adapter.materialize_joint_plan(
+                plan,
+                held_gripper_driver_degrees=held_gripper_driver_degrees,
+            ),
+        )
+
+    def _verify_work_sequence(
+        self,
+        plans: Sequence[JointMotionPlan],
+        *,
+        gripper_qpos: float,
+    ) -> VerifiedJointMotionSequence:
+        """对即将原样执行的最终计划逐点执行 MuJoCo 预检。"""
+
+        return self._trajectory_validator.verify_collision_free_sequence(
+            plans,
+            self._kinematics,
+            gripper_qpos=gripper_qpos,
+        )
+
     def _execute_work_target(
         self,
         target_position_m: Sequence[float],
@@ -1123,37 +1191,39 @@ class SO100PlusArmSession:
         gripper_degrees, gripper_qpos = self._snapshot_gripper_qpos(
             current_snapshot
         )
+        direct_error: Exception | None = None
         try:
-            if self._work_workspace.requires_reference_hub:
-                plans = self._plan_irregular_work_sequence(
+            direct_plans = self._plan_direct_work_sequence(
+                target=target,
+                held_gripper_driver_degrees=gripper_degrees,
+            )
+            verified = self._verify_work_sequence(
+                direct_plans,
+                gripper_qpos=gripper_qpos,
+            )
+        except Exception as error:
+            direct_error = error
+            if not self._work_workspace.requires_reference_hub:
+                raise RuntimeError(
+                    "工作区完整轨迹 MuJoCo 预检查失败或直接规划失败："
+                    f"{error}"
+                ) from error
+            try:
+                hub_plans = self._plan_irregular_work_sequence(
                     current_snapshot=current_snapshot,
                     target=target,
                     held_gripper_driver_degrees=gripper_degrees,
                 )
-            else:
-                plan = self._work_adapter.plan_move_to(*target)
-                plans = (
-                    self._work_adapter.materialize_joint_plan(
-                        plan,
-                        held_gripper_driver_degrees=gripper_degrees,
-                    ),
-                )
-        except Exception as error:
-            raise RuntimeError(
-                f"不规则工作区中心通道规划失败：{error}"
-            ) from error
-        try:
-            verified = (
-                self._trajectory_validator.verify_collision_free_sequence(
-                    plans,
-                    self._kinematics,
+                verified = self._verify_work_sequence(
+                    hub_plans,
                     gripper_qpos=gripper_qpos,
                 )
-            )
-        except Exception as error:
-            raise RuntimeError(
-                f"工作区完整轨迹 MuJoCo 预检查失败：{error}"
-            ) from error
+            except Exception as hub_error:
+                raise RuntimeError(
+                    "工作区直接轨迹未通过，且 middle_internal 中心通道"
+                    "回退也失败："
+                    f"直接路径={direct_error}；中心通道={hub_error}"
+                ) from hub_error
         try:
             for verified_plan in verified.plans:
                 self._work_adapter.execute_joint_plan(verified_plan)
@@ -1416,16 +1486,22 @@ class SO100PlusArmSession:
                 and not interrupted
                 and isinstance(error, SO100PlusMotionConvergenceError)
             ):
+                message += f"；失败类型：{_describe_convergence_failure(error)}"
                 recovered_state, recovery_reason = (
                     self._try_reauthenticate_after_convergence_error(
                         expected_gripper_driver_degrees=gripper_degrees,
                     )
                 )
                 if recovered_state is not None:
+                    retry_guidance = (
+                        "实际姿态已是 WORK，无需重试 unfold_arm。"
+                        if recovered_state is ArmSessionState.WORK
+                        else "仍处于 REST，可由用户显式重试 unfold_arm。"
+                    )
                     message += (
                         "；本次只是到位误差，真实反馈已自动"
                         f"重新认证为 {recovered_state.value}；"
-                        "程序没有自动重试运动，可由用户显式重试。"
+                        f"程序没有自动重试运动；{retry_guidance}"
                     )
                 else:
                     message += f"；{recovery_reason}"
@@ -1551,16 +1627,22 @@ class SO100PlusArmSession:
                 and not interrupted
                 and isinstance(error, SO100PlusMotionConvergenceError)
             ):
+                message += f"；失败类型：{_describe_convergence_failure(error)}"
                 recovered_state, recovery_reason = (
                     self._try_reauthenticate_after_convergence_error(
                         expected_gripper_driver_degrees=gripper_degrees,
                     )
                 )
                 if recovered_state is not None:
+                    retry_guidance = (
+                        "实际姿态已是 REST，无需重试 fold_arm。"
+                        if recovered_state is ArmSessionState.REST
+                        else "仍处于 WORK，可由用户显式重试 fold_arm。"
+                    )
                     message += (
                         "；本次只是到位误差，真实反馈已自动"
                         f"重新认证为 {recovered_state.value}；"
-                        "程序没有自动重试运动，可由用户显式重试。"
+                        f"程序没有自动重试运动；{retry_guidance}"
                     )
                 else:
                     message += f"；{recovery_reason}"

@@ -35,6 +35,7 @@ class ExecutionController:
         self._running: bool = False
         self._lock = Lock()
         self._last_result: ExecutionResult | None = None
+        self._active_command_id: str | None = None
 
 
     def submit(self, command: Command) -> bool:
@@ -54,6 +55,7 @@ class ExecutionController:
                 self._before_submit(command)
             self._running = True
             self._last_result = None
+            self._active_command_id = command.command_id
             self._worker = Thread(target=self._run_in_background, args=(command,))
         self._worker.start()
         return True
@@ -99,6 +101,7 @@ class ExecutionController:
                     )
             with self._lock:
                 self._running = False
+                self._active_command_id = None
                 self._last_result = result
 
     def is_running(self) -> bool:
@@ -107,6 +110,14 @@ class ExecutionController:
         """
         with self._lock:
             return self._running
+
+    @property
+    def active_command_id(self) -> str | None:
+        """返回正在执行的命令 ID；空闲时返回 ``None``。"""
+
+        with self._lock:
+            return self._active_command_id
+
     def last_result(self) -> ExecutionResult | None:
         """
         获取上一次命令的执行结果。这个方法会返回一个 ExecutionResult 对象，表示上一次命令的执行结果。

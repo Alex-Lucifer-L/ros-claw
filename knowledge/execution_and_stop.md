@@ -29,7 +29,9 @@ source_files:
 `ExecutionController.submit()` 在 Lock 下拒绝并发普通命令、初始化新动作
 stop 世代并注册 worker，然后在线程中运行 Gateway。Controller 同时只
 运行一个普通命令，结束后保存最后一个 `ExecutionResult`；CLI 的
-`result` 读取该结果。
+`result` 读取该结果。忙碌时第二条普通命令直接拒绝，不排队、不覆盖
+worker/Command/结果；CLI 会显示当前 `command_id`，只有 `result` 和
+`stop` 继续放行。
 
 ## stop 中断
 
@@ -45,5 +47,8 @@ stop 不会被底层 clear 掉，首条写入前到达时应零运动中断。
 
 Runtime shutdown 先 stop，再有限等待后台线程。线程仍使用硬件时不能
 提前 disconnect；超时后保留延迟清理机会，线程最终结束后再断开。
-退出不会擅自展开或收纳。当前正常规则仅在认证 REST 状态关闭力矩；其他
-姿态停止并断开但不自动卸力。RAG 和 LLM 不参与关闭顺序。
+退出不会擅自展开或收纳。SO-100 Plus 普通 `exit` 只在认证 REST 状态
+放行；WORK、TRANSITION、UNVERIFIED 会拒绝普通退出并留在输入循环。
+显式 `emergency_exit`/“紧急退出”或 Ctrl+C 会请求 stop，等待后台动作
+结束，再紧急关闭力矩并断开，同时警告姿态可能没有回到 REST。RAG 和
+LLM 不参与关闭顺序。

@@ -51,6 +51,10 @@ class SO100PlusArmSafetyError(RuntimeError):
 class SO100PlusMotionConvergenceError(SO100PlusArmSafetyError):
     """轨迹安全完成，但最终位置或稳定时间没有达到验收门槛。"""
 
+    def __init__(self, message: str, *, failure_kind: str = "convergence"):
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
 
 class SO100PlusTorqueReleaseSafetyError(RuntimeError):
     """普通力矩释放不满足 follower_rest 前置条件。"""
@@ -1383,7 +1387,8 @@ class SO100PlusAdapter(ArmAdapter):
                     f"{max_error_measured:.6f}°，跟踪误差 "
                     f"{max_error:.6f}° 仍超过 "
                     f"{self.motion_config.stream_critical_tracking_error_limit_degrees:.1f}°，"
-                    "已保持当前位置。"
+                    "已保持当前位置。",
+                    failure_kind="stream_catchup_timeout",
                 )
 
             wait_seconds = min(
@@ -1560,7 +1565,8 @@ class SO100PlusAdapter(ArmAdapter):
                         f"{self.motion_config.waypoint_timeout_seconds:.1f} 秒内"
                         "没有连续稳定 "
                         f"{self.motion_config.final_settle_seconds:.2f} 秒，"
-                        "已保持当前位置。"
+                        "已保持当前位置。",
+                        failure_kind="stability_timeout",
                     )
                 raise SO100PlusMotionConvergenceError(
                     f"关节 {max_error_joint} 在 "
@@ -1569,7 +1575,8 @@ class SO100PlusAdapter(ArmAdapter):
                     f"{max_error_measured:.6f}°，跟踪误差 "
                     f"{max_error:.6f}° 超过 "
                     f"{self.motion_config.joint_position_tolerance_degrees:.1f}°，"
-                    "已保持当前位置。"
+                    "已保持当前位置。",
+                    failure_kind="position_timeout",
                 )
 
             wait_seconds = min(

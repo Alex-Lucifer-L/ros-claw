@@ -79,9 +79,14 @@ def test_submit_rejects_second_command_while_running():
 
     assert first_accepted is True
     assert second_accepted is False
+    assert controller.active_command_id == "cmd-001"
+    assert controller.last_result() is None
 
     allow_motion_finish.set()
-    controller.wait(timeout=1.0)
+    result = controller.wait(timeout=1.0)
+
+    assert result.command_id == "cmd-001"
+    assert controller.active_command_id is None
 
 
 def test_request_stop_runs_while_background_command_is_active():
