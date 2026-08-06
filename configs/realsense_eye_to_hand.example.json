@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "camera_serial": "<realsense-serial>",
+  "width": 640,
+  "height": 480,
+  "camera_frame": "realsense_color_optical_frame",
+  "base_frame": "so100_plus_base",
+  "units": "m",
+  "dataset_sha256": "<generated-from-real-point-pairs>",
+  "method": "kabsch_svd_point_pairs",
+  "T_base_from_camera": null,
+  "active": false,
+  "note": "Example only. No formal transform is provided; generate it from real point pairs."
+}

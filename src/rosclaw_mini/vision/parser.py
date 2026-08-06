@@ -69,6 +69,31 @@ def _strip_json_fence(raw_response: str) -> str:
     return match.group("body").strip() if match else text
 
 
+def decode_scene_observation_payload(raw_response: str) -> dict[str, Any]:
+    """Decode the JSON object while preserving the strict schema parser.
+
+    RealSense localization needs to convert a model-native integer pixel box
+    into the public normalized ``bounding_box`` before the ordinary
+    :class:`SceneObservationParser` validates the complete response.  Keeping
+    JSON fence handling here avoids a second, subtly different JSON decoder.
+    """
+
+    if not isinstance(raw_response, str) or not raw_response.strip():
+        raise VLMResponseParseError("视觉模型返回了空响应。")
+    try:
+        payload = json.loads(_strip_json_fence(raw_response))
+    except json.JSONDecodeError as error:
+        raise VLMResponseParseError(
+            "视觉模型返回的内容不是有效 JSON；响应摘要："
+            f"{_safe_excerpt(raw_response)!r}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise SceneObservationValidationError(
+            "SceneObservation 顶层必须是 JSON 对象。"
+        )
+    return payload
+
+
 def _reject_robot_coordinates(value: Any, *, path: str = "$.") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -152,19 +177,7 @@ class SceneObservationParser:
         model: str,
         include_raw_response: bool = False,
     ) -> SceneObservation:
-        if not isinstance(raw_response, str) or not raw_response.strip():
-            raise VLMResponseParseError("视觉模型返回了空响应。")
-        try:
-            payload = json.loads(_strip_json_fence(raw_response))
-        except json.JSONDecodeError as error:
-            raise VLMResponseParseError(
-                "视觉模型返回的内容不是有效 JSON；响应摘要："
-                f"{_safe_excerpt(raw_response)!r}"
-            ) from error
-        if not isinstance(payload, dict):
-            raise SceneObservationValidationError(
-                "SceneObservation 顶层必须是 JSON 对象。"
-            )
+        payload = decode_scene_observation_payload(raw_response)
 
         _reject_robot_coordinates(payload)
         scene_description = payload.get("scene_description")
@@ -236,4 +249,3 @@ class SceneObservationParser:
             model=str(model),
             raw_response=raw_response if include_raw_response else None,
         )
-

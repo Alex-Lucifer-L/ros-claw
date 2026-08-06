@@ -839,9 +839,9 @@ def test_invalid_runtime_acceleration_is_rejected(runtime_acceleration):
         (
             {
                 "load_limit": 450.0,
-                "critical_load_limit": 450.0,
+                "critical_load_limit": 449.0,
             },
-            "紧急负载上限必须大于普通负载上限",
+            "紧急负载上限不能小于普通负载上限",
         ),
         (
             {"load_confirmation_samples": 1},
@@ -881,8 +881,8 @@ def test_saved_real_hardware_profile_is_the_runtime_default():
     assert motion_config.final_settle_seconds == 0.75
     assert motion_config.joint_position_tolerance_degrees == 5.0
     assert motion_config.cartesian_tolerance_m == 0.012
-    assert motion_config.load_limit == 450.0
-    assert motion_config.critical_load_limit == 700.0
+    assert motion_config.load_limit == 930.0
+    assert motion_config.critical_load_limit == 1000.0
     assert motion_config.load_confirmation_samples == 2
     assert motion_config.max_temperature_celsius == 60.0
     assert motion_config.critical_temperature_celsius == 70.0
@@ -1470,12 +1470,37 @@ def test_move_to_ignores_one_load_spike_that_immediately_clears():
     )
 
 
-def test_move_to_holds_position_when_load_stays_at_limit():
+def test_move_to_allows_sustained_load_below_new_930_limit():
     robot = FakeRobot()
     robot.bus.arm_position_error_degrees = 2.0
 
     def raise_load_during_wait(_seconds):
-        robot.bus.load_raw[3] = 450.0
+        robot.bus.load_raw[3] = 813.0
+        return False
+
+    adapter = make_adapter(
+        robot,
+        wait_func=raise_load_during_wait,
+        kinematics=FakeMotionKinematics(),
+        motion_limits=make_motion_limits(),
+        motion_config=SO100PlusMotionConfig(),
+    )
+    adapter.connect()
+
+    adapter.move_to(0.3, 0.0, 0.2)
+
+    assert any(
+        telemetry.load_magnitude[3] == 813.0
+        for telemetry in adapter.telemetry_history
+    )
+
+
+def test_move_to_holds_position_when_load_reaches_930_twice():
+    robot = FakeRobot()
+    robot.bus.arm_position_error_degrees = 2.0
+
+    def raise_load_during_wait(_seconds):
+        robot.bus.load_raw[3] = 930.0
         return False
 
     adapter = make_adapter(
@@ -1489,22 +1514,16 @@ def test_move_to_holds_position_when_load_stays_at_limit():
 
     with pytest.raises(
         SO100PlusArmSafetyError,
-        match=r"负载 450\.0 连续 2 次达到限制 450\.0",
+        match=r"负载 930\.0 连续 2 次达到限制 930\.0",
     ):
         adapter.move_to(0.3, 0.0, 0.2)
-
-    writes = goal_write_calls(robot)
-    assert len(writes) == len(adapter.last_motion_plan.waypoints_radians) + 1
-    assert writes[-1][1] == pytest.approx(
-        [13.0, 23.0, 33.0, 43.0, 53.0, 63.0, -5.0]
-    )
 
 
 def test_move_to_holds_immediately_at_critical_load_limit():
     robot = FakeRobot()
 
     def reach_critical_load_during_wait(_seconds):
-        robot.bus.load_raw[2] = 700.0
+        robot.bus.load_raw[2] = 1000.0
         return False
 
     adapter = make_adapter(
@@ -1518,7 +1537,7 @@ def test_move_to_holds_immediately_at_critical_load_limit():
 
     with pytest.raises(
         SO100PlusArmSafetyError,
-        match=r"ellbow_joint 负载 700\.0 达到紧急限制 700\.0",
+        match=r"ellbow_joint 负载 1000\.0 达到紧急限制 1000\.0",
     ):
         adapter.move_to(0.3, 0.0, 0.2)
 

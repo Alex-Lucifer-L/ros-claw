@@ -13,6 +13,26 @@ class FrameCaptureError(VisionError):
     """摄像头已打开但无法读取一帧。"""
 
 
+class RealSenseError(VisionError):
+    """RealSense SDK、设备或同步 RGBD 数据无效。"""
+
+
+class RealSenseDependencyError(RealSenseError):
+    """RealSense Python SDK 不可用。"""
+
+
+class RealSenseDeviceError(RealSenseError):
+    """指定 RealSense 设备无法打开或身份不匹配。"""
+
+
+class RealSenseFrameError(RealSenseError):
+    """RealSense 同步 Color/Depth 帧读取失败。"""
+
+
+class TargetLocalizationError(VisionError):
+    """目标框、深度质量或相机三维反投影不足以可靠定位。"""
+
+
 class ImageLoadError(VisionError):
     """本地图像不存在或无法解码。"""
 
@@ -51,3 +71,11 @@ class InsufficientCalibrationDataError(CameraCalibrationError):
 
 class HandEyeCalibrationError(CameraCalibrationError):
     """手眼标定数据、可观测性或求解结果无效。"""
+
+
+class EyeToHandCalibrationError(CameraCalibrationError):
+    """固定外部相机到机械臂基座的标定数据或结果无效。"""
+
+
+class GraspPlanningError(VisionError):
+    """视觉定位数据或抓取计划不满足预览/执行门禁。"""

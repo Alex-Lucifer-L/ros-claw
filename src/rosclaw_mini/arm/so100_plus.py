@@ -95,8 +95,8 @@ class SO100PlusRealHardwareProfile:
     final_settle_seconds: float = 0.75
     joint_position_tolerance_degrees: float = 5.0
     cartesian_tolerance_m: float = 0.012
-    load_limit: float = 450.0
-    critical_load_limit: float = 700.0
+    load_limit: float = 930.0
+    critical_load_limit: float = 1000.0
     load_confirmation_samples: int = 2
     max_temperature_celsius: float = 60.0
     critical_temperature_celsius: float = 70.0
@@ -305,8 +305,8 @@ class SO100PlusMotionConfig:
             raise ValueError("夹爪 TCP 位置容差必须大于 0。")
         if self.load_limit <= 0:
             raise ValueError("手臂负载限制必须大于 0。")
-        if self.critical_load_limit <= self.load_limit:
-            raise ValueError("手臂紧急负载上限必须大于普通负载上限。")
+        if self.critical_load_limit < self.load_limit:
+            raise ValueError("手臂紧急负载上限不能小于普通负载上限。")
         if (
             isinstance(self.load_confirmation_samples, bool)
             or not isinstance(self.load_confirmation_samples, int)

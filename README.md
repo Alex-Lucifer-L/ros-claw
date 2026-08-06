@@ -56,7 +56,8 @@ Checker。
 | SO-100 Plus FK、IK、TCP、会话状态和受控转换轨迹 | 已实现；转换路径仍需现场复验 | 是，由真机运行时装配 |
 | 当前 `right_follower` WORK 空间 | 已接入 10 mm 网格的不规则 MuJoCo 可达集；旧 `12 × 6 × 12 cm` 是有真机代表点记录的核心区 | 是，只由 SO-100 Plus 会话门禁使用 |
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
-| USB 摄像头 → 千问 VLM → `SceneObservation` | V2.0 软件链路和 Fake 测试完成；腕部相机真实单帧已读取 | 是，必须显式选择 `--input-mode vision`；真实百炼视觉 API 尚未验收 |
+| USB 摄像头 → 千问 VLM → `SceneObservation` | V2.0 软件链路、Fake 测试和真实百炼单帧观察已验收 | 是，必须显式选择 `--input-mode vision` |
+| 可选 RealSense RGBD → 相机/基座三维坐标 → 抓取计划预览 | 同步RGBD、Depth对齐、稳健ROI、固定相机外参和逐步安全预检已实现；当前本机粗定位验证 RMSE 约 20.7 mm | 独立只读/预览脚本；未接入真机运动 Skill |
 | 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
 | OpenAI-compatible 同步 LLM 客户端 | 已实现，API Key 可选 | 是，必须显式选择 `--input-mode llm` |
 | 自然语言 → RAG → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
@@ -1035,8 +1036,8 @@ build_so100_plus_right_follower_motion_limits(current_joint_radians)
 | TCP 精度参考线 | 12 mm | 记录计划与实际 TCP 差值，不单独作为危险停止条件 |
 | 到位超时 | 8 s | 防止无限等待 |
 | 最终稳定观察 | 0.75 s | 到位后继续采样抖动 |
-| 手臂普通过载 | 450 | 同一电机连续 2 次达到时停止 |
-| 手臂紧急负载 | 700 | 单次达到时立即停止 |
+| 手臂普通过载 | 930 | 同一电机连续 2 次达到时停止 |
+| 手臂紧急负载 | 1000 | 单次达到时立即停止 |
 | 普通过温 | 60°C | 同一电机连续 2 次达到时停止 |
 | 紧急温度 | 70°C | 单次达到时立即停止 |
 
@@ -1129,11 +1130,18 @@ SO-100 Plus Adapter 原有的可选相机 Factory 和独立连接方法仍然保
 但 V2.0 CLI 不依赖机械臂 Adapter 的相机生命周期。两条路径都不会把
 摄像头变成机械臂连接条件。
 
-完整配置、Schema、摄像头编号检查、运行命令和 V2.1 边界见
-[V2.0 只读视觉观察](docs/vision_observation.md)。腕部摄像头已完成一次
+完整配置、Schema、摄像头编号检查、运行命令和边界见
+[V2.0 只读视觉观察](docs/vision_observation.md)。固定D435i的RGBD定位、
+深度质量和eye-to-hand点对工作流见
+[RealSense RGBD目标定位与固定相机外参](docs/realsense_localization.md)。
+腕部摄像头已完成一次
 真实单帧读取和 15 张多视角内参求解，当前 RMS 为 `0.492674 px`；
-尚需三张独立新视角去畸变验收。真实百炼视觉 API 尚未现场验收；当前也没有目标检测、深度、手眼标定、
-坐标转换或视觉伺服。
+尚需三张独立新视角去畸变验收。固定 D435i 已以 6 个拟合点和 3 个
+独立验证点完成本机 eye-to-hand 粗定位，验证 RMSE 约 `20.7 mm`、
+最大约 `26.6 mm`；操作者明确接受 `25/40 mm` 门槛后，同位置只读基座
+坐标验收误差约 `20.9 mm`。真实矩阵仍只保存在 Git 忽略的
+`local_calibration/`。抓取计划已可做时效、外参、Gateway/Safety Checker
+和正式不规则工作空间预检，但默认只预览，尚未开放真机抓取。
 
 ## 10. Python 调用示例
 
@@ -1439,12 +1447,16 @@ rosclaw-mini/
 摄像头：
 
 - V2.0 单帧 → 千问 VLM → `SceneObservation` 软件链路已接入独立 CLI；
-- 腕部 USB 摄像头已完成独立单帧读取，但与百炼视觉 API 的组合尚未验收；
-- VLM bounding box 只是语义估计，不能用于精密抓取；
+- 腕部 USB 摄像头与百炼视觉 API 已完成独立单帧验收；
+- D435i 已通过 USB 3.2、640×480@30 RGB8+Z16、30组同步帧和Depth对齐
+  的独立只读验收；通用代码不硬编码其序列号或内参；
+- VLM bounding box 只用于选择深度ROI，三维坐标来自运行时内参和对齐深度；
 - 已用 15 张真实多视角得到第一版内参，尚需三张未参与求解的新视角完成去畸变验收；
-- 手眼只读采集和离线求解已实现，但真实多姿态数据与 `tcp_T_camera`
-  尚未现场验收，不会自动接入运动链；
-- 没有目标检测、深度、已验收的像素到机械臂坐标转换和视觉闭环。
+- 腕部相机的 `tcp_T_camera` 与固定 D435i 的 `T_base_from_camera`
+  是两套不同标定，不能混用；
+- 固定 D435i 已有本机真实点对、误差门禁和已激活粗定位外参，
+  但精度只是约 2–3 cm，不适合小物体精密抓取；
+- 视觉抓取目前只生成不可变计划并逐步预检，不会创建真机 Runtime。
 
 工程化：
 
@@ -1473,8 +1485,9 @@ rosclaw-mini/
 4. 在操作者在场、可立即断电的条件下，现场复验现有显式
    `REST → unfold_arm → WORK → fold_arm → REST`，重点核对当次
    follower_rest 展开、任意已认证 WORK 点返回初始点和反向收纳；
-5. 按 `docs/vision_observation.md` 单独完成真实摄像头 + 百炼 VLM 的一帧
-   验证，不要求也不允许机械臂同时连接；
+5. 重新插拔当前能枚举但暂时不出帧的 D435i，先复验只读抓取
+   计划预览；只有高于桌面且整条计划位于正式不规则 WORK 空间
+   的较大目标才能进入后续 Mock/现场验收；
 6. 增加统一结构化遥测日志和运行报告；
 7. 根据实际工位增加底座、桌面、线缆和障碍物模型；
 8. 在输入和底层真机入口都稳定后，再接入复杂 Skill、向量检索、Web 或 ROS 2。
@@ -1486,6 +1499,7 @@ rosclaw-mini/
 
 - [RAG 项目知识索引与维护规则](knowledge/README.md)
 - [V2.0 只读视觉观察、配置与安全边界](docs/vision_observation.md)
+- [RealSense RGBD目标定位与固定相机eye-to-hand标定](docs/realsense_localization.md)
 - [SO-100 Plus 动作、坐标、安全配置与真机验证](docs/arm_actions.md)
 - [SO-100 Plus 仿真候选工作空间](docs/so100_plus_simulated_workspace.md)
 - [SO-100 Plus middle_internal 不规则仿真可达空间](docs/so100_plus_middle_irregular_workspace.md)
