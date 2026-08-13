@@ -28,8 +28,10 @@ from rosclaw_mini.runtime import (
     DEFAULT_SO100_PLUS_FOLLOWER_NAME,
     DEFAULT_SO100_PLUS_PORT,
     build_mock_runtime,
+    build_sim_runtime,
     build_so100_plus_runtime,
 )
+from rosclaw_mini.arm.so100_plus_session import ArmSessionState
 from rosclaw_mini.vision.exceptions import VisionError
 from rosclaw_mini.vision.output import (
     format_observation_json,
@@ -104,9 +106,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=("mock", "so100_plus"),
+        choices=("mock", "sim", "so100_plus"),
         default="mock",
-        help="机械臂后端；默认 mock，真机必须显式选择 so100_plus。",
+        help=(
+            "机械臂后端；默认 mock；sim 是仅本地 headless 仿真；"
+            "真机必须显式选择 so100_plus。"
+        ),
+    )
+    parser.add_argument(
+        "--sim-scene",
+        choices=(
+            "standard",
+            "multi_object",
+            "randomized",
+            "noisy",
+            "depth_holes",
+            "boundary_reject",
+        ),
+        default="standard",
+        help="仅 --backend sim 使用的确定性桌面场景。",
+    )
+    parser.add_argument(
+        "--sim-seed",
+        type=int,
+        default=0,
+        help="仅 --backend sim 使用的随机种子。",
+    )
+    parser.add_argument(
+        "--sim-start-state",
+        choices=("rest", "work"),
+        default="work",
+        help="仅 --backend sim 使用；默认直接从仿真 WORK 状态开始。",
+    )
+    parser.add_argument(
+        "--sim-camera-config",
+        type=Path,
+        default=None,
+        help=(
+            "仅 --backend sim 使用的 simulation_only 相机 JSON；"
+            "真实 eye-to-hand 标定文件会被拒绝。"
+        ),
     )
     parser.add_argument(
         "--port",
@@ -193,6 +232,18 @@ def build_runtime_from_args(args: argparse.Namespace) -> ArmRuntime:
 
     if args.backend == "mock":
         return build_mock_runtime()
+
+    if args.backend == "sim":
+        return build_sim_runtime(
+            scene_name=args.sim_scene,
+            seed=args.sim_seed,
+            start_state=(
+                ArmSessionState.REST
+                if args.sim_start_state == "rest"
+                else ArmSessionState.WORK
+            ),
+            camera_config_path=args.sim_camera_config,
+        )
 
     return build_so100_plus_runtime(
         SO100PlusRobotConfig(
@@ -761,18 +812,30 @@ def main(
         output_func(f"当前后端: {args.backend}")
         session_state = getattr(runtime, "session_state", None)
         if session_state is not None:
-            output_func(f"SO-100 Plus 会话状态: {session_state.value}")
+            session_label = (
+                "仿真会话状态" if args.backend == "sim" else "SO-100 Plus 会话状态"
+            )
+            output_func(f"{session_label}: {session_state.value}")
             if session_state.value == "REST":
-                output_func(
-                    "已认证为 follower_rest；可执行 unfold_arm，"
-                    "普通 move_arm 保持禁用。"
-                )
+                if args.backend == "sim":
+                    output_func("仿真 REST；可执行 unfold_arm，普通 move_arm 保持禁用。")
+                else:
+                    output_func(
+                        "已认证为 follower_rest；可执行 unfold_arm，"
+                        "普通 move_arm 保持禁用。"
+                    )
             elif session_state.value == "WORK":
-                output_func(
-                    "已认证为不规则 WORK 空间的 middle_internal；"
-                    "目标将优先从当前姿态直达并经过完整轨迹门禁，"
-                    "必要时才回退到 middle_internal 中心通道。"
-                )
+                if args.backend == "sim":
+                    output_func(
+                        "仿真 WORK；普通移动仍经过不规则工作空间、"
+                        "MuJoCo 轨迹预检和 Gateway。"
+                    )
+                else:
+                    output_func(
+                        "已认证为不规则 WORK 空间的 middle_internal；"
+                        "目标将优先从当前姿态直达并经过完整轨迹门禁，"
+                        "必要时才回退到 middle_internal 中心通道。"
+                    )
         if runtime.current_tcp_position_m is not None:
             position = ", ".join(
                 f"{value:.6f}"

@@ -1,0 +1,18 @@
+{
+  "simulation_only": true,
+  "camera_frame": "sim_d435i_color",
+  "base_frame": "sim_base",
+  "extrinsics_version": "simulation-eye-to-hand-v1",
+  "warning": "This is an estimated virtual camera transform. Do not copy it to RealSense eye-to-hand calibration.",
+  "width": 640,
+  "height": 480,
+  "fps": 30,
+  "horizontal_fov_degrees": 69.0,
+  "depth_scale_m_per_unit": 0.001,
+  "T_base_from_camera": [
+    [0.992404, 0.05708, 0.109128, 0.3],
+    [-0.123021, -0.46025, 0.879064, -0.6],
+    [0.0, -0.885964, -0.463761, 0.55],
+    [0.0, 0.0, 0.0, 1.0]
+  ]
+}

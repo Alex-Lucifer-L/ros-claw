@@ -1,0 +1,3 @@
+# Optional, headless simulation dependency.  The main runtime remains usable
+# without it; ``--backend sim`` fails closed when MuJoCo/model assets are absent.
+mujoco>=3.0,<4

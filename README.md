@@ -8,7 +8,7 @@ RosClaw Mini 是一个面向机械臂控制教学和原型验证的 Python 项�
 自然语言入口，以及
 SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保护，以及 V2.0
 只读结构化视觉观察。统一程序入口可以独立选择 `json/llm/vision` 输入模式和
-`mock/so100_plus` 机械臂后端；默认仍是 `json + mock`，真机还必须额外
+`mock/sim/so100_plus` 机械臂后端；默认仍是 `json + mock`，真机还必须额外
 确认连接、上力和运动风险。
 
 > [!IMPORTANT]
@@ -30,7 +30,8 @@ SO-100 Plus 单臂适配器、运动学、固定姿态工作空间、运行保�
 - [12. 已经完成的真机验证](#12-已经完成的真机验证)
 - [13. 项目结构](#13-项目结构)
 - [14. 当前限制和下一步](#14-当前限制和下一步)
-- [15. 延伸文档](#15-延伸文档)
+- [15. 离线抓取仿真研究](#15-离线抓取仿真研究)
+- [16. 延伸文档](#16-延伸文档)
 
 ## 1. 当前项目处于什么阶段
 
@@ -52,13 +53,14 @@ Checker。
 | `ExecutionController` 后台执行与 `stop` 请求 | 已实现 | 是 |
 | `ArmHandlers` / `ArmAdapter` | 已实现 | 是 |
 | `MockArmAdapter` | 已实现 | 是，默认后端 |
+| `SimulatedArmAdapter` | 已实现；headless、MuJoCo 模型预检、虚拟 RGB-D 和离线抓取评估 | 是，必须显式 `--backend sim` |
 | `SO100PlusAdapter` | 已实现并经过真机验证 | 是，必须显式选择真机并确认风险 |
 | SO-100 Plus FK、IK、TCP、会话状态和受控转换轨迹 | 已实现；转换路径仍需现场复验 | 是，由真机运行时装配 |
 | 当前 `right_follower` WORK 空间 | 已接入 10 mm 网格的不规则 MuJoCo 可达集；旧 `12 × 6 × 12 cm` 是有真机代表点记录的核心区 | 是，只由 SO-100 Plus 会话门禁使用 |
 | 运行期负载、温度、跟踪误差和到位检查 | 已实现并保存真机参数 | 否，由真机 Adapter 使用 |
 | USB 摄像头 → 千问 VLM → `SceneObservation` | V2.0 软件链路、Fake 测试和真实百炼单帧观察已验收 | 是，必须显式选择 `--input-mode vision` |
 | 可选 RealSense RGBD → 相机/基座三维坐标 → 抓取计划预览 | 同步RGBD、Depth对齐、稳健ROI、固定相机外参和逐步安全预检已实现；当前本机粗定位验证 RMSE 约 20.7 mm | 独立只读/预览脚本；未接入真机运动 Skill |
-| 可选择 `mock/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
+| 可选择 `mock/sim/so100_plus` 的统一应用入口 | 已实现，默认 `mock` | 是 |
 | OpenAI-compatible 同步 LLM 客户端 | 已实现，API Key 可选 | 是，必须显式选择 `--input-mode llm` |
 | 自然语言 → RAG → `CommandGenerator` → 现有执行链 | 已实现并有 Fake/Mock 测试 | 是 |
 | 项目知识 Loader、Chunker、KeywordRetriever 与来源标记 | 已实现；默认 LLM 模式启动时加载一次 | 是 |
@@ -72,6 +74,7 @@ Checker。
 - 运行完整单元测试；
 - 离线计算 FK、IK、TCP 和轨迹；
 - 在 MuJoCo 中查看模型、TCP 和路径；
+- 在不打开任何设备的情况下运行虚拟 RGB-D 抓取、提示词对照和 benchmark；
 - 阅读已保存的真机配置和验证报告。
 
 ### 哪些操作会接触真实设备
@@ -121,6 +124,7 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | `llm` | `mock` | 调用模型生成 Command，但只操作内存 Mock |
 | `json` | `so100_plus` | 人工提供结构化命令，显式连接真机 |
 | `llm` | `so100_plus` | 模型生成 Command，再经过完整安全链控制真机；风险最高 |
+| `json` / `llm` | `sim` | 独立 headless SO-100 Plus 研究仿真；绝不打开真实设备 |
 | `vision` | 不适用 | 只读单帧场景观察；不创建 Runtime、Controller 或机械臂连接 |
 
 当前 CLI 参数：
@@ -132,7 +136,10 @@ PYTHONPATH=src python -m rosclaw_mini.main \
 | `--rag-top-k` | `4` | 每条命令最多加入的检索块数量 |
 | `--rag-max-context-chars` | `6000` | 项目知识上下文字符上限 |
 | `--disable-rag` | 未设置 | 临时退回原基础 Command Prompt |
-| `--backend {mock,so100_plus}` | `mock` | 选择内存 Mock 或真实 SO-100 Plus |
+| `--backend {mock,sim,so100_plus}` | `mock` | 选择内存 Mock、headless 仿真或真实 SO-100 Plus |
+| `--sim-scene` | `standard` | `sim` 的场景：标准、多物体、随机、噪声、深度孔洞或越界拒绝 |
+| `--sim-seed` | `0` | `sim` 的确定性随机种子 |
+| `--sim-start-state {work,rest}` | `work` | `sim` 的软件会话初始状态，不代表真机姿态认证 |
 | `--port` | `/dev/lerobot_right` | 真机串口；Mock 模式不使用 |
 | `--calibration-dir` | `lerobot-joycon_plus/.cache/calibration/so100_plus` | 真机校准目录 |
 | `--follower-name` | `right` | 真机 follower 身份 |
@@ -1413,6 +1420,9 @@ rosclaw-mini/
 | `src/rosclaw_mini/safety/limits.py` | 工作空间、关节限制、运动限制和正式真机范围 |
 | `src/rosclaw_mini/arm/base.py` | 定义统一 `ArmAdapter` |
 | `src/rosclaw_mini/arm/mock_arm.py` | 无硬件 Mock 实现 |
+| `src/rosclaw_mini/simulation/` | 独立 sim 后端、虚拟 RGB-D、仿真外参、离线策略和 benchmark；不访问设备 |
+| `scripts/run_sim_grasp.py` | 一次 headless 仿真抓取，输出结构化 simulation-only 结果 |
+| `scripts/run_sim_grasp_benchmark.py` | 以相同场景/种子比较三种策略并保存指标 |
 | `src/rosclaw_mini/arm/so100_plus.py` | 真机 Adapter、运行配置、轨迹和保护 |
 | `src/rosclaw_mini/arm/so100_plus_session.py` | 真机会话状态、展开/收纳编排和状态门禁 |
 | `src/rosclaw_mini/arm/so100_plus_trajectory_validation.py` | 可复用的 MuJoCo 完整关节轨迹碰撞/接触预检查 |
@@ -1495,7 +1505,46 @@ rosclaw-mini/
 这里的优先级是先在 Mock 上验证模型生成结果，再把已经完成的真机能力
 变成可重复配置和启动的应用，最后扩展更多智能化功能。
 
-## 15. 延伸文档
+## 15. 离线抓取仿真研究
+
+当真实 SO-100 Plus、D435i 或实验桌不可用时，可显式选择 `--backend sim`。
+它是独立的 headless 后端：复用本仓库的 SO-100 Plus MuJoCo 模型、六轴
+FK/IK、TCP 定义和不规则工作空间，再以虚拟针孔 RGB-D 相机运行完整的
+视觉抓取研究链路。它不会读取 `/dev`、打开 RealSense pipeline、调用网络
+API 或自动切换到真机。
+
+```bash
+MPLCONFIGDIR=/tmp PYTHONPATH=src:lerobot-joycon_plus \
+  python -m rosclaw_mini.main --backend sim --input-mode json
+
+MPLCONFIGDIR=/tmp PYTHONPATH=src:lerobot-joycon_plus \
+  python scripts/run_sim_grasp.py --scene standard --strategy baseline_v1
+
+MPLCONFIGDIR=/tmp PYTHONPATH=src:lerobot-joycon_plus \
+  python scripts/run_sim_grasp_benchmark.py --seeds 3 \
+  --output artifacts/simulation/benchmark.json
+```
+
+研究链路是：自然语言任务 → 离线高层策略 → 虚拟 RGB-D → 像素框与稳健深度
+→ **simulation_only** 外参 → 原有抓取预检、Gateway、Safety Checker 和
+ExecutionController → `SimulatedArmAdapter` → 虚拟夹持/抬升验证。虚拟场景
+的物体真值只用于渲染和最后评估，普通定位与规划不读取它。
+
+三份可版本化策略说明在 `prompts/grasp_baseline_v1.md`、
+`prompts/grasp_efficient_v2.md`、`prompts/grasp_humanlike_v3.md`；完整的
+场景、指标、可运行命令和 sim-to-real 边界见：
+
+- [仿真使用说明](docs/simulation.md)
+- [仿真保真度报告](docs/simulation_fidelity.md)
+- [问题与现场依赖记录](docs/simulation_blockers.md)
+
+> [!WARNING]
+> 仿真相机外参、桌面高度、摩擦、夹持判断与 benchmark 成功率都不能用于
+> 真机。回实验室后必须重新完成只读设备、相机标定、无物体路径、接触、
+> stop 和抓取验收；不要把 `configs/simulation_camera.example.json` 传给真实
+> RealSense 或 SO-100 Plus 入口。
+
+## 16. 延伸文档
 
 - [RAG 项目知识索引与维护规则](knowledge/README.md)
 - [V2.0 只读视觉观察、配置与安全边界](docs/vision_observation.md)

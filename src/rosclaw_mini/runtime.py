@@ -114,7 +114,9 @@ class ArmRuntime:
     controller: ExecutionController
     current_tcp_position_m: tuple[float, float, float] | None = None
     move_arm_disabled_reason: str | None = None
-    session: SO100PlusArmSession | None = None
+    # ``SimulatedArmSession`` intentionally uses the same public state surface
+    # without importing the simulation package into the real runtime module.
+    session: Any | None = None
     shutdown_wait_timeout_seconds: float = (
         DEFAULT_SHUTDOWN_WAIT_TIMEOUT_SECONDS
     )
@@ -387,7 +389,7 @@ def _validate_so100_plus_workspace_certification(
 def _build_controller(
     skills: dict[str, SkillDefinition],
     *,
-    session: SO100PlusArmSession | None = None,
+    session: Any | None = None,
 ) -> ExecutionController:
     def execute_command(command):
         return run_command(command, skills)
@@ -419,6 +421,62 @@ def build_mock_runtime(
         adapter=adapter,
         skills=skills,
         controller=_build_controller(skills),
+    )
+
+
+def build_sim_runtime(
+    *,
+    scene_name: str = "standard",
+    seed: int = 0,
+    start_state: ArmSessionState = ArmSessionState.WORK,
+    step_delay_seconds: float = 0.0,
+    camera_config_path: Path | None = None,
+) -> ArmRuntime:
+    """Build the isolated headless SO-100 Plus research simulator.
+
+    Imports are deliberately local: choosing ``mock`` or ``so100_plus`` never
+    loads simulator resources, and choosing ``sim`` never creates a Robot or
+    opens ``/dev``.  The simulation reuses only offline model files, pure
+    kinematics and the fixed irregular-workspace artifact.
+    """
+
+    from rosclaw_mini.simulation.adapter import SimulatedArmAdapter
+    from rosclaw_mini.simulation.config import (
+        build_simulation_scene,
+        load_simulation_camera_config,
+    )
+    from rosclaw_mini.simulation.session import (
+        SimulatedArmSession,
+        build_simulation_arm_skills,
+    )
+    from rosclaw_mini.simulation.world import SimulationWorld
+
+    scene = build_simulation_scene(scene_name, seed=seed)
+    if camera_config_path is not None:
+        from dataclasses import replace
+
+        scene = replace(
+            scene,
+            camera=load_simulation_camera_config(camera_config_path),
+        )
+    world = SimulationWorld(scene)
+    adapter = SimulatedArmAdapter(
+        world,
+        step_delay_seconds=step_delay_seconds,
+    )
+    adapter.connect()
+    session = SimulatedArmSession(
+        adapter,
+        world.workspace,
+        start_state=start_state,
+    )
+    skills = build_simulation_arm_skills(adapter, session)
+    return ArmRuntime(
+        adapter=adapter,
+        skills=skills,
+        controller=_build_controller(skills, session=session),
+        current_tcp_position_m=adapter.read_tcp_position(),
+        session=session,
     )
 
 

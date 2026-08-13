@@ -43,7 +43,9 @@ right follower 的实际配置、坐标语义、安全限制和手动验证方�
 - ArmHandlers 只组合 Adapter 原子动作，不导入 Feetech 驱动。
 - Adapter 不解析 `Command`，不生成 `ExecutionResult`，不实现 RAG/LLM。
 
-`main.py` 已提供 `mock/so100_plus` 后端选择，默认仍是 `mock`。
+`main.py` 已提供 `mock/sim/so100_plus` 后端选择，默认仍是 `mock`。
+其中 `sim` 是独立 headless 研究后端：它只加载本地模型与仿真配置，绝不
+读取真实串口、相机设备或校准文件；`so100_plus` 才是唯一能连接真机的后端。
 本文后面的真机脚本保留为单项诊断和人工验证工具，不会被默认业务入口
 或单元测试自动调用。
 
